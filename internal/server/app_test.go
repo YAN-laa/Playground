@@ -545,6 +545,50 @@ func TestProbeReconnectReusesExistingProbe(t *testing.T) {
 	}
 }
 
+func TestProbeBecomesOfflineAfterHeartbeatTimeout(t *testing.T) {
+	t.Setenv("APP_EXPORT_DIR", t.TempDir())
+	t.Setenv("APP_PROBE_OFFLINE_AFTER", "20ms")
+	handler, cleanup, err := NewHandler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	var probe shared.Probe
+	doJSON(t, handler, "/api/v1/probes/register", http.MethodPost, shared.RegisterProbeRequest{
+		TenantID:    "tenant-offline",
+		ProbeCode:   "probe-offline-01",
+		Name:        "Offline Probe",
+		Version:     "0.1.0",
+		RuleVersion: "rules-v1",
+	}, &probe, http.StatusCreated, "")
+
+	time.Sleep(40 * time.Millisecond)
+
+	var login shared.LoginResponse
+	doJSON(t, handler, "/api/v1/auth/login", http.MethodPost, shared.LoginRequest{
+		TenantID: "demo-tenant",
+		Username: "admin",
+		Password: "admin123",
+	}, &login, http.StatusOK, "")
+	authHeader := "Bearer " + login.Token
+
+	var probes []shared.Probe
+	doJSON(t, handler, "/api/v1/probes?tenant_id=tenant-offline", http.MethodGet, nil, &probes, http.StatusOK, authHeader)
+	if len(probes) != 1 {
+		t.Fatalf("expected one probe, got %d", len(probes))
+	}
+	if probes[0].Status != "offline" {
+		t.Fatalf("expected probe to be offline after timeout, got %s", probes[0].Status)
+	}
+
+	var detail shared.ProbeDetail
+	doJSON(t, handler, "/api/v1/probes/"+probe.ID, http.MethodGet, nil, &detail, http.StatusOK, authHeader)
+	if detail.Probe.Status != "offline" {
+		t.Fatalf("expected probe detail to show offline, got %s", detail.Probe.Status)
+	}
+}
+
 func TestExportTaskExpires(t *testing.T) {
 	t.Setenv("APP_EXPORT_DIR", t.TempDir())
 	t.Setenv("APP_EXPORT_TTL", "100ms")

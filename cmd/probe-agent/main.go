@@ -383,7 +383,7 @@ type suricataEVEAlias struct {
 	AppProto  string                `json:"app_proto"`
 	Alert     *shared.SuricataAlert `json:"alert,omitempty"`
 	FlowID    any                   `json:"flow_id,omitempty"`
-	Payload   map[string]any        `json:"payload,omitempty"`
+	Payload   any                   `json:"payload,omitempty"`
 }
 
 func decodeSuricataEVE(line []byte) (shared.SuricataEvent, bool) {

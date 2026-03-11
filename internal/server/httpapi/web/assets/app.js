@@ -409,7 +409,7 @@ async function loadTickets() {
 
 async function loadProbes() {
   const probes = await request(`/api/v1/probes?tenant_id=${encodeURIComponent(tenantInput.value)}`);
-  $('probes-list').innerHTML = (probes || []).map((item) => `<li data-probe-id="${item.id}" class="probe-row">${item.name} · ${formatProbeStatus(item.status)} · 编码 ${item.probe_code} · 已应用配置=${item.applied_config_id || '-'} · 已应用规则=${item.applied_rule_id || '-'} · 下发状态=${formatDeployStatus(item.last_deploy_status)}</li>`).join('') || '<li>暂无数据</li>';
+  $('probes-list').innerHTML = (probes || []).map((item) => `<li data-probe-id="${item.id}" class="probe-row">${item.name} · ${formatProbeStatus(item.status)} · 编码 ${item.probe_code} · 最近心跳=${formatDateTime(item.last_heartbeat_at)} · ${formatProbeRuntime(item)} · 已应用配置=${item.applied_config_id || '-'} · 已应用规则=${item.applied_rule_id || '-'} · 下发状态=${formatDeployStatus(item.last_deploy_status)}</li>`).join('') || '<li>暂无数据</li>';
   document.querySelectorAll('.probe-row').forEach((row) => row.addEventListener('click', () => showProbeDetail(row.dataset.probeId)));
 }
 
@@ -648,6 +648,7 @@ async function showProbeDetail(probeID) {
       <span>当前版本：${detail.probe.version || '-'}</span>
       <span>最近下发：${formatDeployStatus(detail.probe.last_deploy_status)}</span>
       <span>最近心跳：${detail.probe.last_heartbeat_at ? formatDateTime(detail.probe.last_heartbeat_at) : '-'}</span>
+      <span>运行状态：${formatProbeRuntime(detail.probe)}</span>
       <span>CPU: ${Number(detail.probe.cpu_usage || 0).toFixed(1)}%</span>
       <span>内存：${Number(detail.probe.mem_usage || 0).toFixed(1)}%</span>
       <span>丢包率：${Number(detail.probe.drop_rate || 0).toFixed(2)}%</span>
@@ -1197,6 +1198,21 @@ function formatDateTime(value) {
   return date.toLocaleString('zh-CN', { hour12: false });
 }
 
+function formatDurationSince(value) {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+  const diff = Math.max(0, Date.now() - date.getTime());
+  const seconds = Math.floor(diff / 1000);
+  if (seconds < 60) return `${seconds} 秒前`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  const days = Math.floor(hours / 24);
+  return `${days} 天前`;
+}
+
 function formatSeverity(value) {
   switch (Number(value || 0)) {
     case 1:
@@ -1309,6 +1325,15 @@ function formatProbeStatus(value) {
     default:
       return value || '未知';
   }
+}
+
+function formatProbeRuntime(probe) {
+  if (!probe) return '-';
+  const since = formatDurationSince(probe.last_heartbeat_at);
+  if (String(probe.status || '').toLowerCase() === 'offline') {
+    return `离线时长 ${since}`;
+  }
+  return `最后活跃 ${since}`;
 }
 
 function formatDeployStatus(value) {

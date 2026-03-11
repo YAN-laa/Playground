@@ -39,6 +39,7 @@ type Service struct {
 	queries             *queryStats
 	exportDir           string
 	exportTTL           time.Duration
+	probeOfflineAfter   time.Duration
 	authMode            string
 	jwtSecret           []byte
 	jwtTTL              time.Duration
@@ -66,6 +67,7 @@ func New(store store.Repository, engine search.Engine, indexer search.Indexer, s
 		queries:             newQueryStats(200, slowQueryThreshold),
 		exportDir:           exportDir,
 		exportTTL:           exportTTL,
+		probeOfflineAfter:   positiveDuration(envDuration("APP_PROBE_OFFLINE_AFTER", 45*time.Second), 45*time.Second),
 		authMode:            normalizeAuthMode(authConfig.Mode),
 		jwtSecret:           []byte(strings.TrimSpace(authConfig.JWTSecret)),
 		jwtTTL:              positiveDuration(authConfig.JWTTTL, 12*time.Hour),
@@ -722,7 +724,15 @@ func (s *Service) ListAuditLogs(ctx context.Context, tenantID string) ([]shared.
 }
 
 func (s *Service) ListProbes(ctx context.Context, tenantID string) ([]shared.Probe, error) {
-	return s.store.ListProbes(ctx, tenantID)
+	probes, err := s.store.ListProbes(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	for idx := range probes {
+		probes[idx] = s.runtimeProbeStatus(probes[idx], now)
+	}
+	return probes, nil
 }
 
 func (s *Service) GetProbeDetail(ctx context.Context, probeID string) (shared.ProbeDetail, bool, error) {
@@ -730,6 +740,7 @@ func (s *Service) GetProbeDetail(ctx context.Context, probeID string) (shared.Pr
 	if err != nil || !ok {
 		return shared.ProbeDetail{}, ok, err
 	}
+	probe = s.runtimeProbeStatus(probe, time.Now().UTC())
 	var binding *shared.ProbeBinding
 	value, ok, err := s.store.GetProbeBindingByProbeID(ctx, probeID)
 	if err != nil {
@@ -1267,6 +1278,7 @@ func (s *Service) DashboardStats(ctx context.Context, tenantID string) (shared.D
 		return shared.DashboardStats{}, err
 	}
 	stats := shared.DashboardStats{FlowsObserved: len(flows)}
+	now := time.Now().UTC()
 	for _, alert := range alerts {
 		if alert.Status == "closed" {
 			stats.AlertsClosed++
@@ -1275,6 +1287,7 @@ func (s *Service) DashboardStats(ctx context.Context, tenantID string) (shared.D
 		}
 	}
 	for _, probe := range probes {
+		probe = s.runtimeProbeStatus(probe, now)
 		if probe.Status == "online" {
 			stats.ProbesOnline++
 		}
@@ -1285,6 +1298,19 @@ func (s *Service) DashboardStats(ctx context.Context, tenantID string) (shared.D
 		}
 	}
 	return stats, nil
+}
+
+func (s *Service) runtimeProbeStatus(probe shared.Probe, now time.Time) shared.Probe {
+	if strings.EqualFold(probe.Status, "offline") {
+		return probe
+	}
+	if s.probeOfflineAfter <= 0 || probe.LastHeartbeatAt.IsZero() {
+		return probe
+	}
+	if now.Sub(probe.LastHeartbeatAt) > s.probeOfflineAfter {
+		probe.Status = "offline"
+	}
+	return probe
 }
 
 func (s *Service) ReportSummary(ctx context.Context, tenantID string, since time.Time) (shared.ReportSummary, error) {
