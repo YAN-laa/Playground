@@ -500,6 +500,51 @@ func TestEndToEndFlow(t *testing.T) {
 	}
 }
 
+func TestProbeReconnectReusesExistingProbe(t *testing.T) {
+	t.Setenv("APP_EXPORT_DIR", t.TempDir())
+	handler, cleanup, err := NewHandler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	registerBody := shared.RegisterProbeRequest{
+		TenantID:    "tenant-probe",
+		ProbeCode:   "probe-stable-01",
+		Name:        "Stable Probe",
+		Version:     "0.1.0",
+		RuleVersion: "rules-v1",
+	}
+
+	var first shared.Probe
+	doJSON(t, handler, "/api/v1/probes/register", http.MethodPost, registerBody, &first, http.StatusCreated, "")
+	time.Sleep(5 * time.Millisecond)
+
+	var second shared.Probe
+	doJSON(t, handler, "/api/v1/probes/register", http.MethodPost, registerBody, &second, http.StatusCreated, "")
+
+	if first.ID != second.ID {
+		t.Fatalf("expected reconnect to reuse probe id, got first=%s second=%s", first.ID, second.ID)
+	}
+
+	var login shared.LoginResponse
+	doJSON(t, handler, "/api/v1/auth/login", http.MethodPost, shared.LoginRequest{
+		TenantID: "demo-tenant",
+		Username: "admin",
+		Password: "admin123",
+	}, &login, http.StatusOK, "")
+	authHeader := "Bearer " + login.Token
+
+	var probes []shared.Probe
+	doJSON(t, handler, "/api/v1/probes?tenant_id=tenant-probe", http.MethodGet, nil, &probes, http.StatusOK, authHeader)
+	if len(probes) != 1 {
+		t.Fatalf("expected one visible probe after reconnect, got %d", len(probes))
+	}
+	if probes[0].ProbeCode != registerBody.ProbeCode {
+		t.Fatalf("unexpected probe code: %+v", probes[0])
+	}
+}
+
 func TestExportTaskExpires(t *testing.T) {
 	t.Setenv("APP_EXPORT_DIR", t.TempDir())
 	t.Setenv("APP_EXPORT_TTL", "100ms")

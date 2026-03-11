@@ -129,8 +129,16 @@ func (s *Service) nextID(prefix string) string {
 
 func (s *Service) RegisterProbe(ctx context.Context, req shared.RegisterProbeRequest) (shared.Probe, error) {
 	now := time.Now().UTC()
+	probeID := s.nextID("probe")
+	createdAt := now
+	if existing, ok, err := s.store.FindProbeByCode(ctx, req.TenantID, req.ProbeCode); err != nil {
+		return shared.Probe{}, err
+	} else if ok {
+		probeID = existing.ID
+		createdAt = existing.CreatedAt
+	}
 	probe := shared.Probe{
-		ID:              s.nextID("probe"),
+		ID:              probeID,
 		TenantID:        req.TenantID,
 		ProbeCode:       req.ProbeCode,
 		Name:            req.Name,
@@ -138,7 +146,7 @@ func (s *Service) RegisterProbe(ctx context.Context, req shared.RegisterProbeReq
 		Version:         req.Version,
 		RuleVersion:     req.RuleVersion,
 		LastHeartbeatAt: now,
-		CreatedAt:       now,
+		CreatedAt:       createdAt,
 	}
 	created, err := s.store.UpsertProbe(ctx, probe)
 	if err == nil {
@@ -290,6 +298,7 @@ func (s *Service) GetAlertDetail(ctx context.Context, id string) (shared.AlertDe
 		return shared.AlertDetail{}, false, err
 	}
 	events := make([]shared.RawEvent, 0)
+	contextEvents := make([]shared.RawEvent, 0)
 	flowIDs := make([]string, 0)
 	for _, event := range rawEvents {
 		payload := event.Payload
@@ -306,6 +315,16 @@ func (s *Service) GetAlertDetail(ctx context.Context, id string) (shared.AlertDe
 				flowIDs = append(flowIDs, payload.FlowID)
 			}
 		}
+	}
+	for _, event := range rawEvents {
+		payload := event.Payload
+		if payload.FlowID == "" || !contains(flowIDs, payload.FlowID) {
+			continue
+		}
+		if payload.EventType == "alert" {
+			continue
+		}
+		contextEvents = append(contextEvents, event)
 	}
 	flows, err := s.store.ListFlowsByIDs(ctx, alert.TenantID, flowIDs)
 	if err != nil {
@@ -333,11 +352,12 @@ func (s *Service) GetAlertDetail(ctx context.Context, id string) (shared.AlertDe
 		activities = append(activities, items...)
 	}
 	return shared.AlertDetail{
-		Alert:      alert,
-		Events:     events,
-		Flows:      flows,
-		Tickets:    tickets,
-		Activities: activities,
+		Alert:         alert,
+		Events:        events,
+		ContextEvents: contextEvents,
+		Flows:         flows,
+		Tickets:       tickets,
+		Activities:    activities,
 	}, true, nil
 }
 

@@ -387,6 +387,10 @@ type suricataEVEAlias struct {
 }
 
 func decodeSuricataEVE(line []byte) (shared.SuricataEvent, bool) {
+	var raw map[string]any
+	if err := json.Unmarshal(line, &raw); err != nil {
+		return shared.SuricataEvent{}, false
+	}
 	var alias suricataEVEAlias
 	if err := json.Unmarshal(line, &alias); err != nil {
 		return shared.SuricataEvent{}, false
@@ -410,7 +414,7 @@ func decodeSuricataEVE(line []byte) (shared.SuricataEvent, bool) {
 		AppProto:  alias.AppProto,
 		Alert:     alias.Alert,
 		FlowID:    normalizeFlowID(alias.FlowID),
-		Payload:   alias.Payload,
+		Payload:   raw,
 	}, true
 }
 

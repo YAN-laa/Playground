@@ -405,11 +405,12 @@ type Alert struct {
 }
 
 type AlertDetail struct {
-	Alert      Alert      `json:"alert"`
-	Events     []RawEvent `json:"events"`
-	Flows      []Flow     `json:"flows"`
-	Tickets    []Ticket   `json:"tickets"`
-	Activities []Activity `json:"activities"`
+	Alert         Alert      `json:"alert"`
+	Events        []RawEvent `json:"events"`
+	ContextEvents []RawEvent `json:"context_events"`
+	Flows         []Flow     `json:"flows"`
+	Tickets       []Ticket   `json:"tickets"`
+	Activities    []Activity `json:"activities"`
 }
 
 type AlertQuery struct {

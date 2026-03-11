@@ -595,10 +595,20 @@ async function showAlertDetail(alertID, shouldNavigate = true) {
         ? (detail.alert.threat_intel_tags || []).map((tag) => `<span class="tag">${tag}</span>`).join('')
         : '<code>未命中情报标签</code>'}
     </div>
-    <div class="event-list detail-section"><strong>关联流量</strong>${(detail.flows || []).map((flow) => `<code>${flow.flow_id} · ${flow.src_ip}:${flow.src_port} -> ${flow.dst_ip}:${flow.dst_port} · ${flow.app_proto || flow.proto}</code>`).join('') || '<code>暂无关联流量</code>'}</div>
+    <div class="event-list detail-section">
+      <strong>关联流量</strong>
+      <div class="scroll-panel">${(detail.flows || []).map((flow) => `<code>${flow.flow_id} · ${flow.src_ip}:${flow.src_port} -> ${flow.dst_ip}:${flow.dst_port} · ${flow.app_proto || flow.proto}</code>`).join('') || '<code>暂无关联流量</code>'}</div>
+    </div>
     <div class="event-list detail-section"><strong>关联工单</strong>${(detail.tickets || []).map((ticket) => `<code>${ticket.id} · ${ticket.title} · ${formatAlertStatus(ticket.status)} · ${formatTicketPriority(ticket.priority)}</code>`).join('') || '<code>暂无关联工单</code>'}</div>
     <div class="event-list detail-section"><strong>处置记录</strong>${(detail.activities || []).map((activity) => `<code>${formatDateTime(activity.created_at)} · ${formatActivityAction(activity.action)} · ${activity.detail || '-'}</code>`).join('') || '<code>暂无处置记录</code>'}</div>
-    <div class="event-list detail-section"><strong>原始事件</strong>${(detail.events || []).map((event) => `<code>${JSON.stringify(event.payload, null, 2)}</code>`).join('') || '<code>暂无原始事件</code>'}</div>
+    <div class="event-list detail-section">
+      <strong>协议上下文</strong>
+      <div class="scroll-panel">${(detail.context_events || []).map((event) => renderRawEventCard(event)).join('') || '<code>暂无协议上下文</code>'}</div>
+    </div>
+    <div class="event-list detail-section">
+      <strong>原始事件</strong>
+      <div class="scroll-panel">${(detail.events || []).map((event) => renderRawEventCard(event)).join('') || '<code>暂无原始事件</code>'}</div>
+    </div>
   `;
 }
 
@@ -1084,6 +1094,100 @@ async function createUser(event) {
 
 function splitCSV(value) {
   return String(value || '').split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+function renderRawEventCard(event) {
+  const payload = event?.payload?.payload || event?.payload || {};
+  const httpContext = extractHTTPContext(payload);
+  return `
+    <div class="raw-event-card">
+      <div class="raw-event-head">
+        <span class="tag">${payload.event_type || event?.payload?.event_type || 'raw'}</span>
+        <span class="cell-sub">${formatDateTime(payload.timestamp || event?.event_time)}</span>
+      </div>
+      ${httpContext ? renderHTTPContext(httpContext) : ''}
+      <code class="raw-json">${renderRawEventPayload(event)}</code>
+    </div>
+  `;
+}
+
+function renderRawEventPayload(event) {
+  const payload = event?.payload?.payload || event?.payload || {};
+  return escapeHTML(JSON.stringify(payload, null, 2));
+}
+
+function renderHTTPContext(context) {
+  return `
+    <div class="raw-grid">
+      ${context.method ? `<div class="raw-field"><span>请求方法</span><strong>${escapeHTML(context.method)}</strong></div>` : ''}
+      ${context.url ? `<div class="raw-field"><span>请求地址</span><strong>${escapeHTML(context.url)}</strong></div>` : ''}
+      ${context.host ? `<div class="raw-field"><span>主机名</span><strong>${escapeHTML(context.host)}</strong></div>` : ''}
+      ${context.userAgent ? `<div class="raw-field"><span>User-Agent</span><strong>${escapeHTML(context.userAgent)}</strong></div>` : ''}
+      ${context.contentType ? `<div class="raw-field"><span>内容类型</span><strong>${escapeHTML(context.contentType)}</strong></div>` : ''}
+      ${context.status ? `<div class="raw-field"><span>响应状态</span><strong>${escapeHTML(context.status)}</strong></div>` : ''}
+    </div>
+    ${context.body ? `<div class="raw-body"><span>HTTP Body</span><pre>${escapeHTML(context.body)}</pre></div>` : ''}
+  `;
+}
+
+function extractHTTPContext(payload) {
+  const http = payload?.http && typeof payload.http === 'object' ? payload.http : {};
+  const method = firstNonEmpty(http.http_method, payload.http_method, payload.method);
+  const url = firstNonEmpty(http.url, payload.url, payload.uri);
+  const host = firstNonEmpty(http.hostname, payload.hostname, http.host, payload.host);
+  const userAgent = firstNonEmpty(http.http_user_agent, payload.http_user_agent, payload.user_agent);
+  const contentType = firstNonEmpty(http.http_content_type, payload.http_content_type, payload.content_type);
+  const status = firstNonEmpty(http.status, payload.status, payload.http_status);
+  const body = decodeBodyField(
+    firstNonEmpty(
+      payload.http_body,
+      payload['http-body'],
+      payload.http_request_body,
+      payload.request_body,
+      http.http_body,
+      http.body,
+    ),
+  );
+  if (!method && !url && !host && !userAgent && !contentType && !status && !body) {
+    return null;
+  }
+  return { method, url, host, userAgent, contentType, status, body };
+}
+
+function decodeBodyField(value) {
+  if (!value) return '';
+  if (typeof value !== 'string') {
+    return JSON.stringify(value, null, 2);
+  }
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  try {
+    const normalized = trimmed.replace(/\s+/g, '');
+    const decoded = atob(normalized);
+    if (decoded && /[\x09\x0A\x0D\x20-\x7E]/.test(decoded)) {
+      return decoded;
+    }
+  } catch (_) {
+  }
+  return trimmed;
+}
+
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && String(value).trim() !== '') {
+      return String(value);
+    }
+  }
+  return '';
+}
+
+function escapeHTML(value) {
+  return String(value || '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
 }
 
 function formatDateTime(value) {

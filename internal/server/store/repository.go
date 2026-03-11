@@ -10,6 +10,7 @@ import (
 type Repository interface {
 	UpsertProbe(ctx context.Context, probe shared.Probe) (shared.Probe, error)
 	GetProbe(ctx context.Context, id string) (shared.Probe, bool, error)
+	FindProbeByCode(ctx context.Context, tenantID, probeCode string) (shared.Probe, bool, error)
 	ListProbes(ctx context.Context, tenantID string) ([]shared.Probe, error)
 	CreateProbeConfig(ctx context.Context, config shared.ProbeConfig) (shared.ProbeConfig, error)
 	GetProbeConfig(ctx context.Context, id string) (shared.ProbeConfig, bool, error)

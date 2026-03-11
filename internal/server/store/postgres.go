@@ -453,14 +453,31 @@ func (s *PostgresStore) GetProbe(ctx context.Context, id string) (shared.Probe, 
 	return probe, err == nil, err
 }
 
+func (s *PostgresStore) FindProbeByCode(ctx context.Context, tenantID, probeCode string) (shared.Probe, bool, error) {
+	row := s.pool.QueryRow(ctx, `select id, tenant_id, probe_code, name, status, version, rule_version, applied_config_id, applied_rule_id, last_deploy_status, last_deploy_message, last_deploy_at, cpu_usage, mem_usage, drop_rate, last_heartbeat_at, created_at from probes where tenant_id=$1 and probe_code=$2 order by last_heartbeat_at desc, created_at desc limit 1`, tenantID, probeCode)
+	var probe shared.Probe
+	var lastDeployAt *time.Time
+	err := row.Scan(&probe.ID, &probe.TenantID, &probe.ProbeCode, &probe.Name, &probe.Status, &probe.Version, &probe.RuleVersion, &probe.AppliedConfigID, &probe.AppliedRuleID, &probe.LastDeployStatus, &probe.LastDeployMessage, &lastDeployAt, &probe.CPUUsage, &probe.MemUsage, &probe.DropRate, &probe.LastHeartbeatAt, &probe.CreatedAt)
+	if err == pgx.ErrNoRows {
+		return shared.Probe{}, false, nil
+	}
+	if err != nil {
+		return shared.Probe{}, false, err
+	}
+	if lastDeployAt != nil {
+		probe.LastDeployAt = *lastDeployAt
+	}
+	return probe, true, nil
+}
+
 func (s *PostgresStore) ListProbes(ctx context.Context, tenantID string) ([]shared.Probe, error) {
-	query := `select id, tenant_id, probe_code, name, status, version, rule_version, applied_config_id, applied_rule_id, last_deploy_status, last_deploy_message, last_deploy_at, cpu_usage, mem_usage, drop_rate, last_heartbeat_at, created_at from probes`
+	query := `select distinct on (tenant_id, probe_code) id, tenant_id, probe_code, name, status, version, rule_version, applied_config_id, applied_rule_id, last_deploy_status, last_deploy_message, last_deploy_at, cpu_usage, mem_usage, drop_rate, last_heartbeat_at, created_at from probes`
 	args := []any{}
 	if tenantID != "" {
 		query += ` where tenant_id=$1`
 		args = append(args, tenantID)
 	}
-	query += ` order by created_at desc`
+	query += ` order by tenant_id, probe_code, last_heartbeat_at desc, created_at desc`
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err

@@ -89,14 +89,39 @@ func (s *MemoryStore) GetProbe(_ context.Context, id string) (shared.Probe, bool
 	return probe, ok, nil
 }
 
+func (s *MemoryStore) FindProbeByCode(_ context.Context, tenantID, probeCode string) (shared.Probe, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var found shared.Probe
+	ok := false
+	for _, probe := range s.probes {
+		if probe.TenantID != tenantID || probe.ProbeCode != probeCode {
+			continue
+		}
+		if !ok || probe.LastHeartbeatAt.After(found.LastHeartbeatAt) || (probe.LastHeartbeatAt.Equal(found.LastHeartbeatAt) && probe.CreatedAt.After(found.CreatedAt)) {
+			found = probe
+			ok = true
+		}
+	}
+	return found, ok, nil
+}
+
 func (s *MemoryStore) ListProbes(_ context.Context, tenantID string) ([]shared.Probe, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]shared.Probe, 0, len(s.probes))
+	latestByCode := make(map[string]shared.Probe)
 	for _, probe := range s.probes {
 		if tenantID != "" && probe.TenantID != tenantID {
 			continue
 		}
+		key := probe.TenantID + "\x00" + probe.ProbeCode
+		current, ok := latestByCode[key]
+		if !ok || probe.LastHeartbeatAt.After(current.LastHeartbeatAt) || (probe.LastHeartbeatAt.Equal(current.LastHeartbeatAt) && probe.CreatedAt.After(current.CreatedAt)) {
+			latestByCode[key] = probe
+		}
+	}
+	out := make([]shared.Probe, 0, len(latestByCode))
+	for _, probe := range latestByCode {
 		out = append(out, probe)
 	}
 	sort.Slice(out, func(i, j int) bool {
