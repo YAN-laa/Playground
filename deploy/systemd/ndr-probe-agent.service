@@ -1,0 +1,27 @@
+[Unit]
+Description=NDR Probe Agent
+After=network-online.target suricata.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ndr
+Group=ndr
+WorkingDirectory=/opt/ndr-probe
+EnvironmentFile=/etc/ndr/probe-agent.env
+ExecStart=/opt/ndr-probe/bin/probe-agent \
+  --server ${NDR_SERVER_URL} \
+  --tenant ${NDR_TENANT_ID} \
+  --probe-code ${NDR_PROBE_CODE} \
+  --name ${NDR_PROBE_NAME} \
+  --daemon \
+  --poll-interval ${NDR_POLL_INTERVAL} \
+  --heartbeat-interval ${NDR_HEARTBEAT_INTERVAL} \
+  --event-interval ${NDR_EVENT_INTERVAL} \
+  --buffer-dir ${NDR_BUFFER_DIR}
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

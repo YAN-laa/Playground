@@ -1,0 +1,577 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NDR 管理平台</title>
+    <link rel="stylesheet" href="/assets/style.css" />
+  </head>
+  <body>
+    <div class="background"></div>
+    <main class="app-root">
+      <section id="login-view" class="auth-wrap">
+        <div class="card auth-card">
+          <p class="eyebrow">流量威胁检测平台</p>
+          <h1>NDR 管理平台</h1>
+          <p class="muted">默认管理员：demo-tenant / admin / admin123</p>
+          <form id="login-form" class="stack">
+            <input name="tenant_id" placeholder="租户 ID" value="demo-tenant" />
+            <input name="username" placeholder="用户名" value="admin" />
+            <input name="password" type="password" placeholder="密码" value="admin123" />
+            <button type="submit">登录</button>
+          </form>
+          <p id="login-error" class="error"></p>
+        </div>
+      </section>
+
+      <section id="app-view" class="hidden app-shell">
+        <aside class="sidebar card">
+          <div>
+            <p class="eyebrow">NDR 工作台</p>
+            <h2>控制台</h2>
+            <p id="user-summary" class="muted"></p>
+          </div>
+          <nav id="nav-menu" class="nav-menu"></nav>
+          <button id="logout-btn" class="ghost">退出登录</button>
+        </aside>
+
+        <section class="main-panel">
+          <header class="topbar card">
+            <div>
+              <p class="eyebrow">平台概览</p>
+              <h1 id="page-title">总览</h1>
+            </div>
+            <div class="topbar-actions">
+              <input id="tenant-filter" value="demo-tenant" />
+              <button id="refresh-btn">刷新</button>
+            </div>
+          </header>
+
+          <section id="page-overview" class="page active">
+            <div class="card page-card">
+              <div class="panel-head"><h2>模块入口</h2><span>按当前用户权限展示</span></div>
+              <div id="overview-cards" class="module-grid"></div>
+            </div>
+            <div class="stats-grid">
+              <article class="card stat"><span>告警数</span><strong id="stat-alerts">0</strong></article>
+              <article class="card stat"><span>在线探针</span><strong id="stat-probes">0</strong></article>
+              <article class="card stat"><span>工单数</span><strong id="stat-tickets">0</strong></article>
+              <article class="card stat"><span>流量会话</span><strong id="stat-flows">0</strong></article>
+            </div>
+          </section>
+
+          <section id="page-alerts" class="page hidden">
+            <div class="card page-card">
+              <div class="panel-head"><h2>告警中心</h2><span>按时间、源目地址、名称和等级快速筛选</span></div>
+              <div class="alert-toolbar">
+                <div class="filter-grid alert-filter-grid">
+                  <input id="src-filter" placeholder="源 IP" />
+                  <input id="dst-filter" placeholder="目的 IP" />
+                  <input id="signature-filter" placeholder="告警名称 / 签名" />
+                  <input id="assignee-filter" placeholder="处理人" />
+                  <input id="severity-filter" placeholder="等级（1/2/3）" />
+                  <input id="alert-status-filter" placeholder="状态" />
+                  <input id="alert-category-filter" placeholder="攻击类型 / 分类" />
+                  <input id="alert-probe-filter" placeholder="探针 ID" />
+                </div>
+                <div class="alert-toolbar-actions">
+                  <input id="alert-since-filter" type="datetime-local" />
+                  <select id="alert-sort-by">
+                    <option value="last_seen_at">最近发生时间</option>
+                    <option value="severity">告警等级</option>
+                    <option value="risk_score">风险分值</option>
+                  </select>
+                  <select id="alert-sort-order">
+                    <option value="desc">降序</option>
+                    <option value="asc">升序</option>
+                  </select>
+                  <select id="alert-page-size">
+                    <option value="10">每页 10 条</option>
+                    <option value="20">每页 20 条</option>
+                    <option value="50">每页 50 条</option>
+                  </select>
+                  <button id="export-alerts-btn" class="ghost" type="button">导出当前结果</button>
+                </div>
+              </div>
+              <div class="alert-table-wrap">
+                <table class="alert-table">
+                  <thead>
+                    <tr>
+                      <th>最近发生时间</th>
+                      <th>攻击类型</th>
+                      <th>告警名称</th>
+                      <th>告警等级</th>
+                      <th>源 IP</th>
+                      <th>目的 IP</th>
+                      <th>目标资产</th>
+                      <th>状态</th>
+                      <th>风险分</th>
+                      <th>次数</th>
+                    </tr>
+                  </thead>
+                  <tbody id="alerts-body"></tbody>
+                </table>
+              </div>
+              <div class="list-footer">
+                <div id="alerts-total-info" class="muted">共 0 条</div>
+                <div class="detail-actions">
+                  <button id="alerts-prev-btn" class="ghost" type="button">上一页</button>
+                  <span id="alerts-page-info">第 1 页</span>
+                  <input id="alerts-page-jump" type="number" min="1" placeholder="页码" />
+                  <button id="alerts-jump-btn" class="ghost" type="button">跳转</button>
+                  <button id="alerts-next-btn" class="ghost" type="button">下一页</button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section id="page-alert-detail" class="page hidden">
+            <div class="alert-detail-layout">
+              <div class="card page-card">
+                <div class="panel-head">
+                  <div>
+                    <h2>告警详情</h2>
+                    <span id="detail-badge">未选择</span>
+                  </div>
+                  <div class="detail-actions">
+                    <button id="back-to-alerts-btn" class="ghost" type="button">返回告警列表</button>
+                  </div>
+                </div>
+                <div id="alert-detail" class="detail-empty">点击告警查看详情</div>
+              </div>
+              <div class="card page-card alert-action-panel">
+                <div class="panel-head"><h2>处置操作</h2><span>确认、关闭、转工单</span></div>
+                <div class="detail-actions vertical-actions">
+                  <button id="ack-alert-btn" class="ghost" type="button">确认告警</button>
+                  <button id="close-alert-btn" class="ghost" type="button">关闭告警</button>
+                </div>
+                <form id="ticket-form" class="stack compact hidden">
+                  <input name="title" placeholder="工单标题" />
+                  <input name="priority" placeholder="优先级，例如 high / medium / low（高 / 中 / 低）" value="high" />
+                  <input name="assignee" placeholder="处理人" />
+                  <input name="description" placeholder="工单描述" value="从告警详情创建" />
+                  <button type="submit">为当前告警创建工单</button>
+                </form>
+              </div>
+            </div>
+          </section>
+
+          <section id="page-flows" class="page hidden">
+            <div class="card page-card">
+              <div class="panel-head"><h2>流量会话检索</h2><span>独立会话查询</span></div>
+              <div class="filter-grid">
+                <input id="flow-src-filter" placeholder="源 IP" />
+                <input id="flow-dst-filter" placeholder="目的 IP" />
+                <input id="flow-proto-filter" placeholder="应用协议" />
+              </div>
+              <table>
+                <thead><tr><th>会话 ID</th><th>源地址</th><th>目的地址</th><th>协议</th><th>最近时间</th></tr></thead>
+                <tbody id="flows-body"></tbody>
+              </table>
+              <div class="detail-actions">
+                <button id="export-flows-btn" class="ghost" type="button">导出当前流量查询</button>
+              </div>
+            </div>
+          </section>
+
+          <section id="page-tickets" class="page hidden">
+            <div class="card page-card">
+              <div class="panel-head"><h2>工单中心</h2><span>查看详情和流转</span></div>
+              <div class="filter-grid">
+                <input id="ticket-status-filter" placeholder="工单状态" />
+                <input id="ticket-since-filter" type="datetime-local" />
+                <select id="ticket-sort-by">
+                  <option value="created_at">创建时间</option>
+                  <option value="priority">优先级</option>
+                </select>
+                <select id="ticket-sort-order">
+                  <option value="desc">降序</option>
+                  <option value="asc">升序</option>
+                </select>
+                <select id="ticket-page-size">
+                  <option value="10">每页 10 条</option>
+                  <option value="20">每页 20 条</option>
+                  <option value="50">每页 50 条</option>
+                </select>
+              </div>
+              <ul id="tickets-list" class="list"></ul>
+              <div class="detail-actions">
+                <button id="tickets-prev-btn" class="ghost" type="button">上一页</button>
+                <span id="tickets-page-info">第 1 页</span>
+                <input id="tickets-page-jump" type="number" min="1" placeholder="页码" />
+                <button id="tickets-jump-btn" class="ghost" type="button">跳转</button>
+                <button id="tickets-next-btn" class="ghost" type="button">下一页</button>
+              </div>
+            </div>
+            <div class="card page-card">
+              <div class="panel-head"><h2>工单详情</h2></div>
+              <div id="ticket-detail" class="detail-empty">点击工单查看详情</div>
+              <div class="detail-actions">
+                <button id="ticket-progress-btn" class="ghost" type="button">开始处理</button>
+                <button id="ticket-close-btn" class="ghost" type="button">关闭工单</button>
+              </div>
+            </div>
+          </section>
+
+          <section id="page-probes" class="page hidden">
+            <div class="card page-card">
+              <div class="panel-head"><h2>探针管理</h2></div>
+              <ul id="probes-list" class="list"></ul>
+            </div>
+            <div class="card page-card">
+              <div class="panel-head"><h2>探针详情</h2></div>
+              <div class="filter-grid">
+                <input id="probe-metrics-since-filter" type="datetime-local" />
+                <select id="probe-metrics-limit-filter">
+                  <option value="20">最近 20 条</option>
+                  <option value="50">最近 50 条</option>
+                  <option value="100">最近 100 条</option>
+                </select>
+              </div>
+              <div id="probe-detail" class="detail-empty">点击探针查看详情</div>
+              <div class="metric-chart-grid">
+                <div>
+                  <div class="panel-head compact"><h3>CPU 使用率</h3></div>
+                  <div id="probe-metrics-chart-cpu" class="mini-chart"></div>
+                </div>
+                <div>
+                  <div class="panel-head compact"><h3>内存</h3></div>
+                  <div id="probe-metrics-chart-mem" class="mini-chart"></div>
+                </div>
+                <div>
+                  <div class="panel-head compact"><h3>丢包率</h3></div>
+                  <div id="probe-metrics-chart-drop" class="mini-chart"></div>
+                </div>
+              </div>
+            </div>
+            <div class="card page-card">
+              <div class="panel-head"><h2>探针配置模板</h2></div>
+              <ul id="probe-configs-list" class="list"></ul>
+              <form id="probe-config-form" class="stack compact">
+                <input name="name" placeholder="模板名称" />
+                <input name="description" placeholder="模板说明" />
+                <input name="filters" placeholder="过滤条件，逗号分隔" />
+                <input name="output_types" placeholder="输出类型，逗号分隔" />
+                <button type="submit">创建配置模板</button>
+              </form>
+            </div>
+            <div class="card page-card">
+              <div class="panel-head"><h2>规则版本</h2></div>
+              <ul id="rule-bundles-list" class="list"></ul>
+              <form id="rule-bundle-form" class="stack compact">
+                <input name="version" placeholder="版本号" />
+                <input name="description" placeholder="版本说明" />
+                <input name="enabled" placeholder="是否启用：true/false（是 / 否）" value="true" />
+                <button type="submit">创建规则版本</button>
+              </form>
+            </div>
+            <div class="card page-card">
+              <div class="panel-head"><h2>升级包管理</h2><span>维护可下发版本包</span></div>
+              <ul id="upgrade-packages-list" class="list log-list"></ul>
+              <form id="upgrade-package-form" class="stack compact">
+                <input name="version" placeholder="版本号" />
+                <input name="package_url" placeholder="升级包地址" />
+                <input name="checksum" placeholder="校验值" />
+                <input name="notes" placeholder="备注" />
+                <input name="enabled" placeholder="是否启用：true/false（是 / 否）" value="true" />
+                <button type="submit">创建升级包</button>
+              </form>
+            </div>
+            <div class="card page-card">
+              <div class="panel-head"><h2>探针升级 / 回滚</h2><span>下发版本切换任务</span></div>
+              <ul id="probe-upgrade-tasks-list" class="list log-list"></ul>
+              <form id="probe-upgrade-form" class="stack compact">
+                <input name="probe_id" placeholder="探针 ID" />
+                <select name="action">
+                  <option value="upgrade">升级</option>
+                  <option value="rollback">回滚</option>
+                </select>
+                <input name="target_version" placeholder="目标版本" />
+                <input name="max_retries" placeholder="最大重试次数" value="1" />
+                <button type="submit">创建升级任务</button>
+              </form>
+              <form id="probe-upgrade-batch-form" class="stack compact">
+                <input name="probe_ids" placeholder="探针 ID，逗号分隔" />
+                <select name="action">
+                  <option value="upgrade">升级</option>
+                  <option value="rollback">回滚</option>
+                </select>
+                <input name="target_version" placeholder="目标版本" />
+                <input name="max_retries" placeholder="最大重试次数" value="1" />
+                <button type="submit">批量创建升级任务</button>
+              </form>
+              <div id="probe-upgrade-batch-result" class="detail-empty">批量升级任务结果会显示在这里</div>
+            </div>
+            <div class="card page-card">
+              <div class="panel-head"><h2>探针绑定</h2><span>给探针分配配置模板和规则版本</span></div>
+              <ul id="probe-bindings-list" class="list"></ul>
+              <form id="probe-binding-form" class="stack compact">
+                <input name="probe_id" placeholder="探针 ID" />
+                <input name="probe_config_id" placeholder="配置模板 ID" />
+                <input name="rule_bundle_id" placeholder="规则版本 ID" />
+                <button type="submit">应用绑定</button>
+              </form>
+              <form id="probe-binding-batch-form" class="stack compact">
+                <input name="probe_ids" placeholder="探针 ID，逗号分隔" />
+                <input name="probe_config_id" placeholder="配置模板 ID" />
+                <input name="rule_bundle_id" placeholder="规则版本 ID" />
+                <button type="submit">批量应用绑定</button>
+              </form>
+              <div id="probe-binding-batch-result" class="detail-empty">批量执行结果会显示在这里</div>
+            </div>
+            <div class="card page-card">
+              <div class="panel-head"><h2>下发记录</h2><span>模拟配置/规则下发状态</span></div>
+              <div class="filter-grid">
+                <input id="deployment-probe-filter" placeholder="探针 ID" />
+                <input id="deployment-status-filter" placeholder="下发状态" />
+                <input id="deployment-since-filter" type="datetime-local" />
+                <select id="deployment-limit-filter">
+                  <option value="20">最近 20 条</option>
+                  <option value="50">最近 50 条</option>
+                  <option value="100">最近 100 条</option>
+                </select>
+              </div>
+              <ul id="deployments-list" class="list log-list"></ul>
+            </div>
+          </section>
+
+
+          <section id="page-assets" class="page hidden">
+            <div class="card page-card">
+              <div class="panel-head"><h2>资产中心</h2><span>IP 资产映射和重要度</span></div>
+              <ul id="assets-list" class="list"></ul>
+              <form id="asset-form" class="stack compact">
+                <input name="name" placeholder="资产名称" />
+                <input name="ip" placeholder="IP 地址" />
+                <input name="asset_type" placeholder="资产类型" />
+                <input name="importance_level" placeholder="重要等级，例如 high（高）" value="high" />
+                <input name="owner" placeholder="责任人" />
+                <input name="tags" placeholder="标签，逗号分隔" />
+                <button type="submit">创建资产</button>
+              </form>
+            </div>
+          </section>
+
+          <section id="page-intel" class="page hidden">
+            <div class="card page-card">
+              <div class="panel-head"><h2>情报中心</h2><span>IP 情报命中标签</span></div>
+              <ul id="intel-list" class="list"></ul>
+              <form id="intel-form" class="stack compact">
+                <input name="type" placeholder="情报类型" value="ip" />
+                <input name="value" placeholder="情报值" />
+                <input name="severity" placeholder="严重等级，例如 high（高）" value="high" />
+                <input name="source" placeholder="来源，例如 manual（手工）" value="manual" />
+                <input name="tags" placeholder="标签，逗号分隔" />
+                <button type="submit">创建情报</button>
+              </form>
+            </div>
+          </section>
+
+          <section id="page-policies" class="page hidden">
+            <div class="card page-card">
+              <div class="panel-head"><h2>抑制规则</h2><span>白名单和误报抑制</span></div>
+              <ul id="suppression-rules-list" class="list"></ul>
+              <form id="suppression-rule-form" class="stack compact">
+                <input name="name" placeholder="规则名称" />
+                <input name="src_ip" placeholder="源 IP" />
+                <input name="dst_ip" placeholder="目的 IP" />
+                <input name="signature_id" placeholder="签名 ID" />
+                <input name="signature" placeholder="签名名称" />
+                <select name="enabled">
+                  <option value="true">启用</option>
+                  <option value="false">停用</option>
+                </select>
+                <button type="submit">创建抑制规则</button>
+              </form>
+            </div>
+            <div class="card page-card">
+              <div class="panel-head"><h2>风险评分策略</h2><span>按严重级别和富化结果加权</span></div>
+              <ul id="risk-policies-list" class="list"></ul>
+              <form id="risk-policy-form" class="stack compact">
+                <input name="name" placeholder="策略名称" />
+                <input name="severity1_score" placeholder="高危分值" value="90" />
+                <input name="severity2_score" placeholder="中危分值" value="75" />
+                <input name="severity3_score" placeholder="低危分值" value="60" />
+                <input name="default_score" placeholder="默认分值" value="40" />
+                <input name="intel_hit_bonus" placeholder="情报命中加分" value="10" />
+                <input name="critical_asset_bonus" placeholder="核心资产加分" value="10" />
+                <select name="enabled">
+                  <option value="true">启用</option>
+                  <option value="false">停用</option>
+                </select>
+                <button type="submit">创建风险策略</button>
+              </form>
+            </div>
+            <div class="card page-card">
+              <div class="panel-head"><h2>工单自动化规则</h2><span>催办和超时升级</span></div>
+              <ul id="ticket-automation-policies-list" class="list"></ul>
+              <form id="ticket-automation-policy-form" class="stack compact">
+                <input name="name" placeholder="规则名称" />
+                <input name="reminder_before_mins" placeholder="提前催办分钟数" value="30" />
+                <input name="escalation_after_mins" placeholder="超时升级分钟数" value="60" />
+                <input name="escalation_assignee" placeholder="升级后的处理人" value="team-lead" />
+                <input name="escalation_status" placeholder="升级后的状态，例如 escalated" value="escalated" />
+                <select name="enabled">
+                  <option value="true">启用</option>
+                  <option value="false">停用</option>
+                </select>
+                <button type="submit">创建工单自动化规则</button>
+              </form>
+            </div>
+          </section>
+
+          <section id="page-users" class="page hidden">            <div class="card page-card">
+              <div class="panel-head"><h2>用户管理</h2></div>
+              <ul id="users-list" class="list"></ul>
+              <form id="user-form" class="stack compact">
+                <input name="username" placeholder="用户名" />
+                <input name="display_name" placeholder="显示名称" />
+                <input name="password" placeholder="密码" />
+                <input name="roles" placeholder="角色，逗号分隔" />
+                <input name="allowed_tenants" placeholder="允许租户，逗号分隔" />
+                <input name="allowed_probe_ids" placeholder="允许探针 ID，逗号分隔" />
+                <button type="submit">创建用户</button>
+              </form>
+            </div>
+          </section>
+
+          <section id="page-roles" class="page hidden">
+            <div class="card page-card">
+              <div class="panel-head"><h2>角色管理</h2></div>
+              <ul id="roles-list" class="list"></ul>
+              <form id="role-form" class="stack compact">
+                <input name="name" placeholder="角色名称" />
+                <input name="description" placeholder="角色说明" />
+                <input name="permissions" placeholder="权限项，逗号分隔" />
+                <button type="submit">创建角色</button>
+              </form>
+            </div>
+          </section>
+
+          <section id="page-reports" class="page hidden">
+            <div class="card page-card">
+              <div class="panel-head"><h2>报表中心</h2><span>趋势与 TOP 榜</span></div>
+              <div class="filter-grid">
+                <input id="report-since-filter" type="datetime-local" />
+              </div>
+              <div class="report-grid">
+                <div>
+                  <h3>告警趋势</h3>
+                  <div id="report-alert-chart" class="mini-chart"></div>
+                  <ul id="report-alert-trend" class="list"></ul>
+                </div>
+                <div>
+                  <h3>工单趋势</h3>
+                  <div id="report-ticket-chart" class="mini-chart"></div>
+                  <ul id="report-ticket-trend" class="list"></ul>
+                </div>
+                <div>
+                  <h3>高频签名</h3>
+                  <div id="report-signatures-chart" class="mini-chart"></div>
+                  <ul id="report-signatures" class="list"></ul>
+                </div>
+                <div>
+                  <h3>高频源 IP</h3>
+                  <div id="report-sources-chart" class="mini-chart"></div>
+                  <ul id="report-sources" class="list"></ul>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section id="page-notifications" class="page hidden">
+            <div class="card page-card">
+              <div class="panel-head"><h2>通知通道</h2><span>当前支持控制台和 Webhook</span></div>
+              <ul id="notification-channels-list" class="list"></ul>
+              <form id="notification-channel-form" class="stack compact">
+                <input name="name" placeholder="通道名称" />
+                <select name="type">
+                  <option value="console">控制台</option>
+                  <option value="webhook">Webhook</option>
+                </select>
+                <input name="target" placeholder="Webhook 地址（控制台通道可留空）" />
+                <input name="events" placeholder="事件列表，逗号分隔" value="alert.updated,ticket.created,ticket.updated" />
+                <select name="enabled">
+                  <option value="true">启用</option>
+                  <option value="false">停用</option>
+                </select>
+                <button type="submit">创建通知通道</button>
+              </form>
+            </div>
+            <div class="card page-card">
+              <div class="panel-head"><h2>通知模板</h2><span>按事件渲染通知摘要</span></div>
+              <ul id="notification-templates-list" class="list"></ul>
+              <form id="notification-template-form" class="stack compact">
+                <input name="name" placeholder="模板名称" />
+                <input name="event_type" placeholder="事件类型" value="ticket.sla_breach" />
+                <input name="title_template" placeholder="标题模板" value="{{event_type}} {{resource_id}}" />
+                <input name="body_template" placeholder="内容模板" value="status={{status}} priority={{priority}}" />
+                <button type="submit">创建通知模板</button>
+              </form>
+            </div>
+            <div class="card page-card">
+              <div class="panel-head"><h2>通知记录</h2><span>展示最近发送结果</span></div>
+              <ul id="notification-records-list" class="list log-list"></ul>
+            </div>
+          </section>
+
+          <section id="page-exports" class="page hidden">
+            <div class="card page-card">
+              <div class="panel-head"><h2>导出中心</h2><span>异步导出任务与下载</span></div>
+              <div class="filter-grid">
+                <select id="export-format-filter">
+                  <option value="json">JSON 格式</option>
+                  <option value="csv">CSV 格式</option>
+                </select>
+              </div>
+              <div class="detail-actions">
+                <button id="export-alerts-page-btn" type="button">导出当前告警查询</button>
+                <button id="export-flows-page-btn" type="button">导出当前流量查询</button>
+                <button id="refresh-exports-btn" class="ghost" type="button">刷新任务</button>
+              </div>
+            </div>
+            <div class="card page-card">
+              <div class="panel-head"><h2>导出任务</h2></div>
+              <ul id="exports-list" class="list log-list"></ul>
+            </div>
+          </section>
+
+          <section id="page-query-stats" class="page hidden">
+            <div class="card page-card">
+              <div class="panel-head"><h2>查询统计</h2><span>最近查询耗时与慢查询</span></div>
+              <div class="filter-grid">
+                <select id="query-stats-scope-filter">
+                  <option value="all">全部查询</option>
+                  <option value="slow">仅慢查询</option>
+                </select>
+                <button id="refresh-query-stats-btn" class="ghost" type="button">刷新统计</button>
+              </div>
+              <div class="stats-grid">
+                <article class="card stat compact-stat"><span>查询总数</span><strong id="query-stat-total">0</strong></article>
+                <article class="card stat compact-stat"><span>慢查询数</span><strong id="query-stat-slow">0</strong></article>
+                <article class="card stat compact-stat"><span>平均耗时</span><strong id="query-stat-avg">0ms</strong></article>
+                <article class="card stat compact-stat"><span>最大耗时</span><strong id="query-stat-max">0ms</strong></article>
+              </div>
+            </div>
+            <div class="card page-card">
+              <div class="panel-head"><h2>查询耗时趋势</h2></div>
+              <div id="query-stats-chart" class="mini-chart"></div>
+            </div>
+            <div class="card page-card">
+              <div class="panel-head"><h2>查询列表</h2></div>
+              <ul id="query-stats-list" class="list log-list"></ul>
+            </div>
+          </section>
+
+          <section id="page-audit" class="page hidden">
+            <div class="card page-card">
+              <div class="panel-head"><h2>审计日志</h2></div>
+              <ul id="audit-list" class="list log-list"></ul>
+            </div>
+          </section>
+        </section>
+      </section>
+    </main>
+    <script src="/assets/app.js"></script>
+  </body>
+</html>

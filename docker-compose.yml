@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: ndr-postgres
+    environment:
+      POSTGRES_DB: ndr
+      POSTGRES_USER: ndr
+      POSTGRES_PASSWORD: ndr
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+volumes:
+  postgres-data:
