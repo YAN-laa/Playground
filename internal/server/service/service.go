@@ -314,7 +314,8 @@ func (s *Service) GetAlertDetail(ctx context.Context, id string) (shared.AlertDe
 	if err != nil || !ok {
 		return shared.AlertDetail{}, ok, err
 	}
-	rawEvents, err := s.store.ListRawEvents(ctx, alert.TenantID, alert.FirstSeenAt.Add(-24*time.Hour), alert.LastSeenAt.Add(24*time.Hour), alert.ProbeIDs)
+	since, until := alertDetailScope(alert)
+	rawEvents, err := s.store.ListRawEvents(ctx, alert.TenantID, since, until, alert.ProbeIDs)
 	if err != nil {
 		return shared.AlertDetail{}, false, err
 	}
@@ -337,6 +338,8 @@ func (s *Service) GetAlertDetail(ctx context.Context, id string) (shared.AlertDe
 			}
 		}
 	}
+	events = limitRawEvents(events, 16)
+	flowIDs = limitStrings(flowIDs, 8)
 	for _, event := range rawEvents {
 		payload := event.Payload
 		if payload.FlowID == "" || !contains(flowIDs, payload.FlowID) {
@@ -347,10 +350,12 @@ func (s *Service) GetAlertDetail(ctx context.Context, id string) (shared.AlertDe
 		}
 		contextEvents = append(contextEvents, event)
 	}
+	contextEvents = limitRawEvents(contextEvents, 40)
 	flows, err := s.store.ListFlowsByIDs(ctx, alert.TenantID, flowIDs)
 	if err != nil {
 		return shared.AlertDetail{}, false, err
 	}
+	flows = limitFlows(flows, 12)
 	tickets, err := s.store.ListTicketsByAlert(ctx, alert.TenantID, alert.ID)
 	if err != nil {
 		return shared.AlertDetail{}, false, err
@@ -389,9 +394,9 @@ func (s *Service) GetAlertDetail(ctx context.Context, id string) (shared.AlertDe
 		Tickets:             tickets,
 		Activities:          activities,
 		DecisionBasis:       decisionBasis,
-		SameSourceTimeline:  buildRelatedAlertTimeline("source", alert, append([]shared.Alert{alert}, similarSource...), rawEvents),
-		SameTargetTimeline:  buildRelatedAlertTimeline("target", alert, append([]shared.Alert{alert}, similarTarget...), rawEvents),
-		SameFlowTimeline:    buildFlowTimeline(events, contextEvents),
+		SameSourceTimeline:  limitTimelineItems(buildRelatedAlertTimeline("source", alert, append([]shared.Alert{alert}, similarSource...), rawEvents), 30),
+		SameTargetTimeline:  limitTimelineItems(buildRelatedAlertTimeline("target", alert, append([]shared.Alert{alert}, similarTarget...), rawEvents), 30),
+		SameFlowTimeline:    limitTimelineItems(buildFlowTimeline(events, contextEvents), 40),
 		SimilarSourceAlerts: similarSource,
 		SimilarTargetAlerts: similarTarget,
 	}, true, nil
@@ -3443,6 +3448,47 @@ func summarizeForSnippet(value string) string {
 		return trimmed[:180] + " ..."
 	}
 	return trimmed
+}
+
+func alertDetailScope(alert shared.Alert) (time.Time, time.Time) {
+	window := time.Duration(maxInt(alert.WindowMinutes, 10)) * time.Minute
+	if window > 2*time.Hour {
+		window = 2 * time.Hour
+	}
+	if window < 10*time.Minute {
+		window = 10 * time.Minute
+	}
+	since := alert.FirstSeenAt.Add(-window)
+	until := alert.LastSeenAt.Add(window)
+	return since, until
+}
+
+func limitRawEvents(items []shared.RawEvent, limit int) []shared.RawEvent {
+	if limit <= 0 || len(items) <= limit {
+		return items
+	}
+	return items[:limit]
+}
+
+func limitStrings(items []string, limit int) []string {
+	if limit <= 0 || len(items) <= limit {
+		return items
+	}
+	return items[:limit]
+}
+
+func limitFlows(items []shared.Flow, limit int) []shared.Flow {
+	if limit <= 0 || len(items) <= limit {
+		return items
+	}
+	return items[:limit]
+}
+
+func limitTimelineItems(items []shared.AlertTimelineItem, limit int) []shared.AlertTimelineItem {
+	if limit <= 0 || len(items) <= limit {
+		return items
+	}
+	return items[len(items)-limit:]
 }
 
 func maxInt(left, right int) int {

@@ -1183,15 +1183,18 @@ async function loadQueryStats() {
 }
 
 async function showAlertDetail(alertID, shouldNavigate = true) {
+  if (shouldNavigate) {
+    $('detail-badge').textContent = alertID;
+    $('alert-detail').className = 'detail-card detail-hero';
+    $('alert-detail').innerHTML = '<div class="detail-empty">正在加载告警详情...</div>';
+    await navigate('alert-detail', { alertID });
+    return;
+  }
   const detail = await request(`/api/v1/alerts/${alertID}/detail`);
   if (detail.error) return;
   state.selectedAlert = detail;
   $('detail-badge').textContent = detail.alert.id;
   $('ticket-form').classList.remove('hidden');
-  if (shouldNavigate) {
-    await navigate('alert-detail', { alertID });
-    return;
-  }
   $('alert-detail').className = 'detail-card detail-hero';
   $('alert-detail').innerHTML = `
     <div class="detail-title-row">
@@ -1202,6 +1205,7 @@ async function showAlertDetail(alertID, shouldNavigate = true) {
       </div>
       <div class="detail-score-card">
         <span class="severity-badge ${formatSeverityClass(detail.alert.severity)}">${formatSeverity(detail.alert.severity)}</span>
+        <span class="status-pill ${formatAttackResultClass(detail.alert.attack_result)}">${formatAttackResult(detail.alert.attack_result)}</span>
         <span class="status-pill ${formatStatusClass(detail.alert.status)}">${formatAlertStatus(detail.alert.status)}</span>
         <strong>${detail.alert.risk_score || 0}</strong>
         <span>风险分</span>
@@ -2148,6 +2152,7 @@ function renderInvestigationContext(detail) {
 
 function renderProtocolPanel(detail, scope) {
   const merged = mergeInvestigationEvents(detail);
+  const visible = merged.slice(0, 36);
   if (!merged.length) {
     return '<code>暂无可用于研判的协议和上下文事件</code>';
   }
@@ -2158,20 +2163,20 @@ function renderProtocolPanel(detail, scope) {
       <button class="ghost" type="button" data-protocol-filter="${scope}" data-kind="fileinfo">只看文件</button>
       <button class="ghost" type="button" data-protocol-filter="${scope}" data-kind="flow">只看 Flow</button>
     </div>
+    <div class="cell-sub">共 ${merged.length} 条上下文事件，仅展示最新 ${visible.length} 条，避免详情页卡顿。</div>
     <div class="scroll-panel protocol-panel" data-protocol-scope="${scope}">
-      ${renderProtocolViews(detail)}
+      ${renderProtocolViews(visible)}
     </div>
   `;
 }
 
-function renderProtocolViews(detail) {
-  const merged = mergeInvestigationEvents(detail);
-  if (!merged.length) {
+function renderProtocolViews(events) {
+  if (!events.length) {
     return '<code>暂无可用于研判的协议和上下文事件</code>';
   }
   return `
     <div class="protocol-stream">
-      ${merged.map((event) => renderInvestigationEventCard(event)).join('')}
+      ${events.map((event) => renderInvestigationEventCard(event)).join('')}
     </div>
   `;
 }
@@ -2594,10 +2599,20 @@ function decodeBodyField(value) {
   }
   const trimmed = value.trim();
   if (!trimmed) return '';
+  if (trimmed.length > 32768) {
+    return '';
+  }
+  if (!/^[A-Za-z0-9+/=\r\n]+$/.test(trimmed)) {
+    return trimmed;
+  }
   try {
     const normalized = trimmed.replace(/\s+/g, '');
     const decoded = atob(normalized);
     if (decoded && /[\x09\x0A\x0D\x20-\x7E]/.test(decoded)) {
+      const nonPrintable = decoded.replace(/[\x09\x0A\x0D\x20-\x7E]/g, '');
+      if (nonPrintable.length > decoded.length * 0.2) {
+        return '';
+      }
       return decoded;
     }
   } catch (_) {
