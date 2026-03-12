@@ -9,6 +9,7 @@ const state = {
   selectedRawAlert: null,
   selectedTicket: null,
   selectedProbe: null,
+  alertDetailTab: 'details',
   selectedAlertIDs: new Set(),
   selectedTicketIDs: new Set(),
   alertPage: 1,
@@ -1226,74 +1227,106 @@ async function showAlertDetail(alertID, shouldNavigate = true) {
   const detail = await request(`/api/v1/alerts/${alertID}/detail`);
   if (detail.error) return;
   state.selectedAlert = detail;
+  state.alertDetailTab = state.alertDetailTab || 'details';
   $('detail-badge').textContent = detail.alert.id;
-  $('ticket-form').classList.remove('hidden');
   $('alert-detail').className = 'detail-card detail-hero';
   $('alert-detail').innerHTML = `
-    <div class="detail-title-row">
-      <div>
-        <div class="detail-subtitle">${detail.alert.category || '未分类'} · ${detail.alert.signature_id || '-'}</div>
-        <strong>${detail.alert.signature}</strong>
-        <div class="cell-sub">聚合依据：源地址 + 目的地址 + 目的端口 + 协议 + 规则签名，${detail.alert.window_minutes || 30} 分钟窗口，跨探针合并</div>
+    <div class="alert-detail-shell alert-detail-ref">
+      <div class="alert-header-bar">
+        <div class="alert-header-main">
+          <div class="alert-title-top">
+            <span class="severity-dot ${formatSeverityClass(detail.alert.severity)}"></span>
+            <strong>${detail.alert.signature}</strong>
+            <span class="alert-id-text">ID: ${detail.alert.id}</span>
+          </div>
+          <div class="alert-header-status">
+            <span class="status-pill ${formatAttackResultClass(detail.alert.attack_result)}">${formatAttackResult(detail.alert.attack_result)}</span>
+            <span class="status-pill ${formatStatusClass(detail.alert.status)}">${formatAlertStatus(detail.alert.status)}</span>
+            <span class="tag subtle">${detail.alert.category || '未分类'}</span>
+            <span class="tag subtle">SID ${detail.alert.signature_id || '-'}</span>
+          </div>
+        </div>
+        <div class="alert-header-actions">
+          <button class="ghost action-menu-btn" type="button" data-alert-action="ack">确认告警</button>
+          <button class="ghost action-menu-btn" type="button" data-alert-action="close">关闭告警</button>
+          <button class="ghost action-menu-btn" type="button" data-alert-action="toggle-ticket">创建工单</button>
+          <button class="ghost action-menu-btn" type="button" data-alert-raw-link="true">查看原始命中</button>
+        </div>
       </div>
-      <div class="detail-score-card">
-        <span class="severity-badge ${formatSeverityClass(detail.alert.severity)}">${formatSeverity(detail.alert.severity)}</span>
-        <span class="status-pill ${formatAttackResultClass(detail.alert.attack_result)}">${formatAttackResult(detail.alert.attack_result)}</span>
-        <span class="status-pill ${formatStatusClass(detail.alert.status)}">${formatAlertStatus(detail.alert.status)}</span>
-        <strong>${detail.alert.risk_score || 0}</strong>
-        <span>风险分</span>
+
+      <div class="alert-tag-toolbar">
+        <span class="detail-tag-label">研判标签</span>
+        <div class="alert-tag-list">
+          ${(detail.alert.threat_intel_tags || []).length
+            ? (detail.alert.threat_intel_tags || []).map((tag) => `<span class="tag">${tag}</span>`).join('')
+            : '<span class="tag subtle">暂无标签</span>'}
+        </div>
+        <button class="ghost compact-icon-btn" type="button" disabled>添加</button>
       </div>
-    </div>
-    <div class="detail-meta detail-meta-3">
-      <span>首次发生：${formatDateTime(detail.alert.first_seen_at)}</span>
-      <span>最近发生：${formatDateTime(detail.alert.last_seen_at)}</span>
-      <span>聚合次数：${detail.alert.event_count || 0}</span>
-      <span>源地址：${detail.alert.src_ip}:${detail.alert.src_port || '-'}</span>
-      <span>目的地址：${detail.alert.dst_ip}:${detail.alert.dst_port || '-'}</span>
-      <span>协议：${detail.alert.proto || '-'}</span>
-      <span>源资产：${detail.alert.source_asset_name || '-'}</span>
-      <span>目标资产：${detail.alert.target_asset_name || '-'}</span>
-      <span>攻击结果：${formatAttackResult(detail.alert.attack_result)}</span>
-      <span>处理人：${detail.alert.assignee || '-'}</span>
-    </div>
-    <div class="event-list detail-section">
-      <strong>告警详情</strong>
-      ${renderAlertOverview(detail)}
-    </div>
-    <div class="event-list detail-section">
-      <strong>情报命中</strong>
-      ${(detail.alert.threat_intel_tags || []).length
-        ? (detail.alert.threat_intel_tags || []).map((tag) => `<span class="tag">${tag}</span>`).join('')
-        : '<code>未命中情报标签</code>'}
-    </div>
-    <div class="event-list detail-section">
-      <strong>关联流量</strong>
-      <div class="scroll-panel">${(detail.flows || []).map((flow) => `<code>${flow.flow_id} · ${flow.src_ip}:${flow.src_port} -> ${flow.dst_ip}:${flow.dst_port} · ${flow.app_proto || flow.proto}</code>`).join('') || '<code>暂无关联流量</code>'}</div>
-    </div>
-    <div class="event-list detail-section"><strong>关联工单</strong>${(detail.tickets || []).map((ticket) => `<code>${ticket.id} · ${ticket.title} · ${formatAlertStatus(ticket.status)} · ${formatTicketPriority(ticket.priority)}</code>`).join('') || '<code>暂无关联工单</code>'}</div>
-    <div class="event-list detail-section"><strong>处置记录</strong>${(detail.activities || []).map((activity) => `<code>${formatDateTime(activity.created_at)} · ${formatActivityAction(activity.action)} · ${activity.detail || '-'}</code>`).join('') || '<code>暂无处置记录</code>'}</div>
-    <div class="event-list detail-section">
-      <strong>原始命中联查</strong>
-      <div class="detail-actions">
-        <button class="ghost" type="button" data-alert-raw-link="true">查看原始命中</button>
+
+      <div class="alert-stat-strip alert-stat-strip-ref">
+        <div class="alert-stat-item"><span>最近发生时间</span><strong>${formatDateTime(detail.alert.last_seen_at)}</strong></div>
+        <div class="alert-stat-item"><span>关联事件数</span><strong>${detail.alert.event_count || 0}</strong></div>
+        <div class="alert-stat-item"><span>影响资产</span><strong>${detail.alert.target_asset_name || detail.alert.dst_ip || '-'}</strong></div>
+        <div class="alert-stat-item"><span>源 / 目标</span><strong>${detail.alert.src_ip || '-'} -> ${detail.alert.dst_ip || '-'}</strong></div>
       </div>
-    </div>
-    <div class="event-list detail-section">
-      <strong>关联关系</strong>
-      <div class="relation-entry-grid">
-        ${renderRelationEntryCard(detail, 'source')}
-        ${renderRelationEntryCard(detail, 'target')}
+
+      <div class="alert-tabs alert-tabs-ref">
+        ${renderAlertTabButton('details', '详情')}
+        ${renderAlertTabButton('similar', `相似告警 ${Math.max(detail.similar_source_alerts?.length || 0, detail.similar_target_alerts?.length || 0)}`)}
+        ${renderAlertTabButton('raw', `日志列表 ${detail.events?.length || 0}`)}
+        ${renderAlertTabButton('fields', '告警字段')}
+        ${renderAlertTabButton('entities', '威胁实体')}
       </div>
-    </div>
-    <div class="event-list detail-section">
-      <strong>同 Flow 时间线</strong>
-      ${renderTimelinePanel(detail.same_flow_timeline || [], 'flow')}
-    </div>
-    <div class="event-list detail-section">
-      <strong>分析上下文事件流</strong>
-      ${renderProtocolPanel(detail, 'alert-detail')}
+
+      <div class="alert-tab-panels">
+        <section class="alert-tab-panel ${state.alertDetailTab === 'details' ? '' : 'hidden'}" data-alert-tab-panel="details">
+          ${renderAlertDetailSummaryTab(detail)}
+        </section>
+        <section class="alert-tab-panel ${state.alertDetailTab === 'similar' ? '' : 'hidden'}" data-alert-tab-panel="similar">
+          ${renderAlertSimilarTab(detail)}
+        </section>
+        <section class="alert-tab-panel ${state.alertDetailTab === 'raw' ? '' : 'hidden'}" data-alert-tab-panel="raw">
+          ${renderAlertRawHitsTab(detail)}
+        </section>
+        <section class="alert-tab-panel ${state.alertDetailTab === 'fields' ? '' : 'hidden'}" data-alert-tab-panel="fields">
+          ${renderAlertFieldsTab(detail)}
+        </section>
+        <section class="alert-tab-panel ${state.alertDetailTab === 'entities' ? '' : 'hidden'}" data-alert-tab-panel="entities">
+          ${renderAlertEntitiesTab(detail)}
+        </section>
+      </div>
+
+      <form id="inline-ticket-form" class="stack compact detail-inline-form hidden">
+        <input name="title" placeholder="工单标题" value="${escapeHTML(`处置-${detail.alert.signature}`)}" />
+        <input name="priority" placeholder="优先级，例如 high / medium / low（高 / 中 / 低）" value="high" />
+        <input name="assignee" placeholder="处理人" value="${escapeHTML(state.user?.username || '')}" />
+        <input name="description" placeholder="工单描述" value="从告警详情创建" />
+        <button type="submit">提交工单</button>
+      </form>
     </div>
   `;
+  document.querySelectorAll('[data-alert-action]').forEach((button) => button.addEventListener('click', async () => {
+    const action = button.dataset.alertAction;
+    if (action === 'ack') {
+      await updateSelectedAlert('ack');
+      return;
+    }
+    if (action === 'close') {
+      await updateSelectedAlert('closed');
+      return;
+    }
+    if (action === 'toggle-ticket') {
+      $('inline-ticket-form')?.classList.toggle('hidden');
+    }
+  }));
+  document.querySelectorAll('[data-alert-tab]').forEach((button) => button.addEventListener('click', () => {
+    state.alertDetailTab = button.dataset.alertTab || 'details';
+    document.querySelectorAll('[data-alert-tab]').forEach((item) => item.classList.toggle('active', item === button));
+    document.querySelectorAll('[data-alert-tab-panel]').forEach((panel) => {
+      panel.classList.toggle('hidden', panel.dataset.alertTabPanel !== state.alertDetailTab);
+    });
+  }));
   document.querySelectorAll('[data-alert-relation]').forEach((button) => button.addEventListener('click', async () => {
     await navigate('alert-relation', {
       alertID: detail.alert.id,
@@ -1309,6 +1342,17 @@ async function showAlertDetail(alertID, shouldNavigate = true) {
     state.rawAlertPage = 1;
     await navigate('raw-alerts', { page: 1, pageSize: state.rawAlertPageSize });
   }));
+  $('inline-ticket-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(event.target).entries());
+    data.tenant_id = detail.alert.tenant_id;
+    data.alert_id = detail.alert.id;
+    await request('/api/v1/tickets', { method: 'POST', body: JSON.stringify(data) });
+    event.target.classList.add('hidden');
+    await showAlertDetail(detail.alert.id, false);
+    await loadTickets();
+    await loadOverviewStats();
+  });
   bindTimelineFilters();
   bindProtocolEventFilters();
 }
@@ -1346,11 +1390,196 @@ async function showAlertRelationGraph(alertID, relation = 'source', shouldNaviga
   }));
 }
 
+function renderAlertTabButton(key, label) {
+  return `<button type="button" class="alert-tab ${state.alertDetailTab === key ? 'active' : ''}" data-alert-tab="${key}">${escapeHTML(label)}</button>`;
+}
+
+function renderAlertDetailSummaryTab(detail) {
+  const overview = buildAlertSummaryOverview(detail);
+  return `
+    <div class="detail-tab-grid detail-tab-grid-ref">
+      <section class="detail-tab-section detail-hero-section">
+        <div class="detail-summary-grid">
+          ${renderAlertOverview(detail)}
+          ${renderAlertInsightPanel(overview)}
+        </div>
+      </section>
+      <section class="detail-tab-section">
+        <h3>举证详情</h3>
+        ${renderProtocolEvidenceScene(detail)}
+      </section>
+      <section class="detail-tab-section">
+        <div class="detail-split-grid">
+          <div>
+            <h3>关联流量</h3>
+            ${renderFlowEvidence(detail.flows || [], detail)}
+          </div>
+          <div>
+            <h3>同 Flow 时间线</h3>
+            ${renderTimelinePanel(detail.same_flow_timeline || [], 'flow')}
+          </div>
+        </div>
+      </section>
+      <section class="detail-tab-section">
+        <h3>分析上下文事件流</h3>
+        ${renderProtocolPanel(detail, 'alert-detail')}
+      </section>
+    </div>
+  `;
+}
+
+function renderAlertSimilarTab(detail) {
+  return `
+    <div class="detail-tab-grid">
+      <section class="detail-tab-section">
+        <h3>同源关系</h3>
+        <p class="cell-sub">围绕当前源地址查看它在当前攻击窗口内影响了哪些目标和探针。</p>
+        <div class="relation-entry-grid">
+          ${renderRelationEntryCard(detail, 'source')}
+        </div>
+      </section>
+      <section class="detail-tab-section">
+        <h3>同目标关系</h3>
+        <p class="cell-sub">围绕当前目标地址查看有哪些源在当前攻击窗口内持续命中它。</p>
+        <div class="relation-entry-grid">
+          ${renderRelationEntryCard(detail, 'target')}
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function renderAlertRawHitsTab(detail) {
+  const rows = (detail.events || []).map((event) => {
+    const payload = event?.payload?.payload || event?.payload || {};
+    return {
+      id: event.id || payload.id || '',
+      time: payload.timestamp || event.event_time,
+      type: formatEventType(payload.event_type || 'alert'),
+      src: `${payload.src_ip || detail.alert.src_ip || '-'}:${payload.src_port || detail.alert.src_port || '-'}`,
+      dst: `${payload.dest_ip || payload.dst_ip || detail.alert.dst_ip || '-'}:${payload.dest_port || payload.dst_port || detail.alert.dst_port || '-'}`,
+      flow: payload.flow_id || detail.alert.flow_id || '-',
+      summary: payload.alert?.signature || detail.alert.signature,
+    };
+  });
+  return `
+    <div class="detail-tab-grid">
+      <section class="detail-tab-section">
+        <h3>日志列表</h3>
+        <div class="alert-table-wrap">
+          <table class="alert-table compact-table">
+            <thead>
+              <tr>
+                <th>发生时间</th>
+                <th>事件类型</th>
+                <th>源地址</th>
+                <th>目的地址</th>
+                <th>Flow ID</th>
+                <th>摘要</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map((row) => `
+                <tr>
+                  <td>${formatDateTime(row.time)}</td>
+                  <td>${escapeHTML(row.type)}</td>
+                  <td>${escapeHTML(row.src)}</td>
+                  <td>${escapeHTML(row.dst)}</td>
+                  <td>${escapeHTML(String(row.flow))}</td>
+                  <td><a href="#/raw-alerts/${encodeURIComponent(row.id)}">${escapeHTML(row.summary)}</a></td>
+                </tr>
+              `).join('') || '<tr><td colspan="6">暂无原始命中</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function renderAlertFieldsTab(detail) {
+  const metadata = extractPrimaryAlertMetadata(detail);
+  return `
+    <div class="detail-tab-grid">
+      <section class="detail-tab-section">
+        <h3>告警字段</h3>
+        <div class="context-grid alert-fields-grid">
+          ${renderFieldCell('告警名称', detail.alert.signature)}
+          ${renderFieldCell('规则 ID', detail.alert.signature_id)}
+          ${renderFieldCell('攻击分类', detail.alert.category)}
+          ${renderFieldCell('严重级别', formatSeverity(detail.alert.severity))}
+          ${renderFieldCell('状态', formatAlertStatus(detail.alert.status))}
+          ${renderFieldCell('攻击结果', formatAttackResult(detail.alert.attack_result))}
+          ${renderFieldCell('风险分', detail.alert.risk_score)}
+          ${renderFieldCell('源地址', `${detail.alert.src_ip || '-'}:${detail.alert.src_port || '-'}`)}
+          ${renderFieldCell('目的地址', `${detail.alert.dst_ip || '-'}:${detail.alert.dst_port || '-'}`)}
+          ${renderFieldCell('协议', detail.alert.app_proto || detail.alert.proto || '-')}
+          ${renderFieldCell('源资产', detail.alert.source_asset_name || '-')}
+          ${renderFieldCell('目标资产', detail.alert.target_asset_name || '-')}
+          ${renderFieldCell('CVE', metadata.cve || '-')}
+          ${renderFieldCell('MITRE 战术', metadata.tactic || '-')}
+          ${renderFieldCell('MITRE 技术', metadata.technique || '-')}
+          ${renderFieldCell('情报命中', (detail.alert.threat_intel_hits || []).join(', ') || '-')}
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function renderAlertEntitiesTab(detail) {
+  const metadata = extractPrimaryAlertMetadata(detail);
+  return `
+    <div class="detail-tab-grid">
+      <section class="detail-tab-section">
+        <h3>威胁实体</h3>
+        <div class="entity-overview-grid">
+          <div class="entity-card">
+            <span class="detail-subtitle">攻击源</span>
+            <strong>${escapeHTML(detail.alert.src_ip || '-')}</strong>
+            <span>${escapeHTML(detail.alert.source_asset_name || '未识别源资产')}</span>
+          </div>
+          <div class="entity-card">
+            <span class="detail-subtitle">受影响资产</span>
+            <strong>${escapeHTML(detail.alert.dst_ip || '-')}</strong>
+            <span>${escapeHTML(detail.alert.target_asset_name || '未识别目标资产')}</span>
+          </div>
+          <div class="entity-card">
+            <span class="detail-subtitle">威胁标签</span>
+            <strong>${escapeHTML((detail.alert.threat_intel_tags || [])[0] || '暂无')}</strong>
+            <span>${escapeHTML((detail.alert.threat_intel_hits || []).join(', ') || '暂无命中项')}</span>
+          </div>
+        </div>
+        <div class="context-grid alert-fields-grid">
+          ${renderFieldCell('攻击阶段', metadata.tactic || '-')}
+          ${renderFieldCell('攻击技术', metadata.technique || '-')}
+          ${renderFieldCell('CVE', metadata.cve || '-')}
+          ${renderFieldCell('影响探针数', detail.alert.probe_count || (detail.alert.probe_ids || []).length || 1)}
+          ${renderFieldCell('首次发生', formatDateTime(detail.alert.first_seen_at))}
+          ${renderFieldCell('最近发生', formatDateTime(detail.alert.last_seen_at))}
+        </div>
+      </section>
+      <section class="detail-tab-section">
+        <h3>处置记录与工单</h3>
+        <div class="event-list">${(detail.activities || []).map((activity) => `<code>${formatDateTime(activity.created_at)} · ${formatActivityAction(activity.action)} · ${activity.detail || '-'}</code>`).join('') || '<code>暂无处置记录</code>'}</div>
+        <div class="event-list">${(detail.tickets || []).map((ticket) => `<code>${ticket.id} · ${ticket.title} · ${formatAlertStatus(ticket.status)} · ${formatTicketPriority(ticket.priority)}</code>`).join('') || '<code>暂无关联工单</code>'}</div>
+      </section>
+    </div>
+  `;
+}
+
+function renderFieldCell(label, value) {
+  return `
+    <div class="context-field">
+      <span>${escapeHTML(String(label))}</span>
+      <strong>${escapeHTML(String(value ?? '-'))}</strong>
+    </div>
+  `;
+}
+
 function renderAlertOverview(detail) {
   const basis = detail?.decision_basis || {};
-  const exchange = extractPrimaryHTTPExchange(detail);
   return `
-    <div class="alert-overview-card">
+    <div class="alert-overview-card alert-overview-ref">
       <div class="context-grid alert-overview-grid">
         <div class="context-field">
           <span>攻击结果</span>
@@ -1379,9 +1608,147 @@ function renderAlertOverview(detail) {
           ${(basis.risk_reason || []).map((item) => `<code>${escapeHTML(item)}</code>`).join('') || '<code>暂无风险依据</code>'}
         </div>
       </div>
-      ${renderBurpExchange(exchange, basis)}
     </div>
   `;
+}
+
+function renderAlertInsightPanel(overview) {
+  return `
+    <div class="alert-overview-side">
+      <div class="context-grid alert-fields-grid">
+        ${renderFieldCell('数据源', overview.dataSource)}
+        ${renderFieldCell('检测引擎', overview.engine)}
+        ${renderFieldCell('影响资产', overview.asset)}
+        ${renderFieldCell('攻击路径', overview.path)}
+      </div>
+      <div class="context-body insight-description">
+        <span>告警描述</span>
+        <pre>${escapeHTML(overview.description)}</pre>
+      </div>
+    </div>
+  `;
+}
+
+function renderProtocolEvidenceScene(detail) {
+  const httpExchange = extractPrimaryHTTPExchange(detail);
+  const dnsEvidence = extractPrimaryDNSExchange(detail);
+  if (httpExchange) {
+    return renderHTTPEvidenceWorkbench(httpExchange, detail);
+  }
+  if (dnsEvidence) {
+    return renderDNSEvidenceWorkbench(dnsEvidence, detail);
+  }
+  return renderGenericEvidenceWorkbench(detail);
+}
+
+function renderHTTPEvidenceWorkbench(exchange, detail) {
+  const requestParsed = parseHTTPRequest(exchange.requestRaw || '');
+  const responseParsed = parseHTTPResponse(exchange.responseRaw || '');
+  return `
+    <div class="protocol-workbench">
+      <div class="protocol-summary-bar">
+        <span class="tag subtle">HTTP 证据</span>
+        <span class="cell-sub">${escapeHTML(exchange.method || '')} ${escapeHTML(exchange.url || '')}</span>
+        <span class="cell-sub">主机 ${escapeHTML(exchange.host || '-')}</span>
+        <span class="cell-sub">状态 ${escapeHTML(exchange.status || '-')}</span>
+      </div>
+      <div class="packet-split">
+        ${renderPacketPanel('请求包', requestParsed.startLine || exchange.requestMeta || '按可读请求整理', requestParsed.headers, requestParsed.body || exchange.requestBody || '')}
+        ${renderPacketPanel('响应包', responseParsed.startLine || exchange.responseMeta || '按可读响应整理', responseParsed.headers, responseParsed.body || exchange.responseBody || detail?.decision_basis?.response_snippet || '')}
+      </div>
+    </div>
+  `;
+}
+
+function renderDNSEvidenceWorkbench(dnsEvidence, detail) {
+  return `
+    <div class="protocol-workbench">
+      <div class="protocol-summary-bar">
+        <span class="tag subtle">DNS 证据</span>
+        <span class="cell-sub">请求域名 ${escapeHTML(dnsEvidence.query || '-')}</span>
+        <span class="cell-sub">记录类型 ${escapeHTML(dnsEvidence.type || '-')}</span>
+        <span class="cell-sub">解析结果 ${escapeHTML(dnsEvidence.answers || '暂无')}</span>
+      </div>
+      <div class="dns-scene">
+        <div class="dns-node-card">
+          <span class="detail-subtitle">源 IP</span>
+          <strong>${escapeHTML(detail.alert.src_ip || '-')}</strong>
+          <span>端口 ${escapeHTML(String(detail.alert.src_port || '-'))}</span>
+        </div>
+        <div class="dns-link-stack">
+          <div class="dns-link-chip">请求域名 ${escapeHTML(dnsEvidence.query || '-')}</div>
+          <div class="dns-link-chip subtle">${escapeHTML(dnsEvidence.answers ? `解析结果 ${dnsEvidence.answers}` : '暂无解析结果')}</div>
+        </div>
+        <div class="dns-node-card">
+          <span class="detail-subtitle">DNS 服务器</span>
+          <strong>${escapeHTML(detail.alert.dst_ip || '-')}</strong>
+          <span>端口 ${escapeHTML(String(detail.alert.dst_port || '-'))}</span>
+        </div>
+      </div>
+      <div class="context-grid dns-evidence-grid">
+        ${renderFieldCell('DNS 查询域名', dnsEvidence.query || '-')}
+        ${renderFieldCell('DNS 查询类型', dnsEvidence.type || '-')}
+        ${renderFieldCell('DNS 响应结果', dnsEvidence.answers || '-')}
+        ${renderFieldCell('DNS 事务 ID', dnsEvidence.txID || '-')}
+      </div>
+    </div>
+  `;
+}
+
+function renderGenericEvidenceWorkbench(detail) {
+  const primaryPayload = detail?.event?.payload?.payload || detail?.event?.payload || detail?.events?.[0]?.payload?.payload || detail?.events?.[0]?.payload || {};
+  const network = extractNetworkContext(primaryPayload, detail?.event || detail?.events?.[0]) || [];
+  return `
+    <div class="protocol-workbench">
+      <div class="protocol-summary-bar">
+        <span class="tag subtle">通用证据</span>
+        <span class="cell-sub">当前协议没有可重构的 HTTP / DNS 交互，展示结构化上下文字段。</span>
+      </div>
+      <div class="context-grid alert-fields-grid">
+        ${network.map((item) => renderFieldCell(item.label, item.value)).join('') || renderFieldCell('证据状态', '暂无可读上下文')}
+      </div>
+    </div>
+  `;
+}
+
+function renderFlowEvidence(flows, detail) {
+  if (!flows.length) {
+    return '<code>暂无关联流量</code>';
+  }
+  return `
+    <div class="flow-evidence-list">
+      ${flows.map((flow) => `
+        <div class="flow-evidence-card">
+          <div class="flow-evidence-head">
+            <strong>${escapeHTML(flow.flow_id || '-')}</strong>
+            <span class="tag subtle">${escapeHTML(String(flow.app_proto || flow.proto || '-').toUpperCase())}</span>
+          </div>
+          <div class="context-grid">
+            ${renderFieldCell('源地址', `${flow.src_ip || '-'}:${flow.src_port || '-'}`)}
+            ${renderFieldCell('目的地址', `${flow.dst_ip || '-'}:${flow.dst_port || '-'}`)}
+            ${renderFieldCell('关联窗口', `${detail.alert.window_minutes || 30} 分钟`)}
+            ${renderFieldCell('跨探针数', detail.alert.probe_count || (detail.alert.probe_ids || []).length || 1)}
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function buildAlertSummaryOverview(detail) {
+  const metadata = extractPrimaryAlertMetadata(detail);
+  return {
+    dataSource: formatProbeSummary(detail.alert.probe_ids || []),
+    engine: 'Suricata / NDR',
+    asset: detail.alert.target_asset_name || detail.alert.dst_ip || '-',
+    path: `${detail.alert.src_ip || '-'} -> ${detail.alert.dst_ip || '-'}`,
+    description: [
+      detail.decision_basis?.attack_result_reason || '',
+      metadata.cve ? `CVE: ${metadata.cve}` : '',
+      metadata.technique ? `攻击技术: ${metadata.technique}` : '',
+      (detail.alert.threat_intel_tags || []).length ? `情报标签: ${(detail.alert.threat_intel_tags || []).join('、')}` : '',
+    ].filter(Boolean).join('\n') || '当前告警已按协议上下文、风险依据和聚合规则进行整理，适合安全员快速研判。',
+  };
 }
 
 function renderAlertRelationPage(detail, graph, relation) {
@@ -1618,6 +1985,25 @@ function extractPrimaryHTTPExchange(detail) {
   return best;
 }
 
+function extractPrimaryDNSExchange(detail) {
+  const merged = mergeInvestigationEvents(detail);
+  let best = null;
+  for (const event of merged) {
+    const payload = event?.payload?.payload || event?.payload || {};
+    const dns = extractDNSContext(payload);
+    if (!dns) continue;
+    const query = dns.find((item) => item.label === '查询域名')?.value || '';
+    const type = dns.find((item) => item.label === '记录类型')?.value || '';
+    const txID = dns.find((item) => item.label === '事务 ID')?.value || '';
+    const answers = dns.find((item) => item.label === '解析结果')?.value || '';
+    best = { query, type, txID, answers };
+    if (query || answers) {
+      break;
+    }
+  }
+  return best;
+}
+
 function renderRelationEntryCard(detail, relation) {
   const isSource = relation === 'source';
   const stats = summarizeTimeline(isSource ? (detail.same_source_timeline || []) : (detail.same_target_timeline || []), relation);
@@ -1657,6 +2043,22 @@ function dominantAttackResult(results) {
     }
   }
   return best;
+}
+
+function extractPrimaryAlertMetadata(detail) {
+  const merged = mergeInvestigationEvents(detail);
+  for (const event of merged) {
+    const payload = event?.payload?.payload || event?.payload || {};
+    const alert = payload?.alert;
+    if (!alert || typeof alert !== 'object') continue;
+    const metadata = alert.metadata && typeof alert.metadata === 'object' ? alert.metadata : {};
+    return {
+      cve: firstNonEmpty(...toFlatValues(metadata.cve)),
+      tactic: firstNonEmpty(...toFlatValues(metadata.mitre_tactic_name)),
+      technique: firstNonEmpty(...toFlatValues(metadata.mitre_technique_name)),
+    };
+  }
+  return { cve: '', tactic: '', technique: '' };
 }
 
 function renderTimelinePanel(items, relation) {
@@ -2625,6 +3027,25 @@ function renderHTTPContext(context) {
   `;
 }
 
+function renderPacketPanel(title, startLine, headers, body) {
+  return `
+    <div class="packet-panel">
+      <div class="packet-panel-head">
+        <strong>${escapeHTML(title)}</strong>
+        <span>${escapeHTML(startLine || '暂无可读报文')}</span>
+      </div>
+      <div class="packet-section">
+        <span>报文头</span>
+        <pre>${escapeHTML([startLine || '', ...(headers || []).map((item) => `${item.name}: ${item.value}`)].filter(Boolean).join('\n') || '暂无可读报文头')}</pre>
+      </div>
+      <div class="packet-section">
+        <span>报文体</span>
+        <pre>${escapeHTML(body || '暂无可读报文体')}</pre>
+      </div>
+    </div>
+  `;
+}
+
 function extractHTTPContext(payload) {
   const http = payload?.http && typeof payload.http === 'object' ? payload.http : {};
   const method = firstNonEmpty(http.http_method, payload.http_method, payload.method);
@@ -2901,7 +3322,7 @@ function looksLikeHTTPResponse(value) {
 function parseHTTPRequest(value) {
   const text = String(value || '').replace(/\r\n/g, '\n');
   if (!text.trim()) {
-    return { headers: [], body: '' };
+    return { startLine: '', headers: [], body: '' };
   }
   const [head, ...bodyParts] = text.split('\n\n');
   const lines = head.split('\n').map((line) => line.trim()).filter(Boolean);
@@ -2912,6 +3333,27 @@ function parseHTTPRequest(value) {
     headers.push({ name: line.slice(0, index).trim(), value: line.slice(index + 1).trim() });
   }
   return {
+    startLine: lines[0] || '',
+    headers,
+    body: bodyParts.join('\n\n').trim(),
+  };
+}
+
+function parseHTTPResponse(value) {
+  const text = String(value || '').replace(/\r\n/g, '\n');
+  if (!text.trim()) {
+    return { startLine: '', headers: [], body: '' };
+  }
+  const [head, ...bodyParts] = text.split('\n\n');
+  const lines = head.split('\n').map((line) => line.trim()).filter(Boolean);
+  const headers = [];
+  for (const line of lines.slice(1)) {
+    const index = line.indexOf(':');
+    if (index === -1) continue;
+    headers.push({ name: line.slice(0, index).trim(), value: line.slice(index + 1).trim() });
+  }
+  return {
+    startLine: lines[0] || '',
     headers,
     body: bodyParts.join('\n\n').trim(),
   };
