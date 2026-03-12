@@ -83,6 +83,8 @@ type UpgradePackage struct {
 	TenantID   string    `json:"tenant_id"`
 	Version    string    `json:"version"`
 	PackageURL string    `json:"package_url"`
+	FileName   string    `json:"file_name"`
+	FileSize   int64     `json:"file_size"`
 	Checksum   string    `json:"checksum"`
 	Notes      string    `json:"notes"`
 	Enabled    bool      `json:"enabled"`
@@ -270,6 +272,8 @@ type Asset struct {
 	TenantID        string    `json:"tenant_id"`
 	Name            string    `json:"name"`
 	IP              string    `json:"ip"`
+	OrgID           string    `json:"org_id"`
+	OrgName         string    `json:"org_name"`
 	AssetType       string    `json:"asset_type"`
 	ImportanceLevel string    `json:"importance_level"`
 	Owner           string    `json:"owner"`
@@ -281,10 +285,29 @@ type CreateAssetRequest struct {
 	TenantID        string   `json:"tenant_id"`
 	Name            string   `json:"name"`
 	IP              string   `json:"ip"`
+	OrgID           string   `json:"org_id"`
 	AssetType       string   `json:"asset_type"`
 	ImportanceLevel string   `json:"importance_level"`
 	Owner           string   `json:"owner"`
 	Tags            []string `json:"tags"`
+}
+
+type Organization struct {
+	ID        string    `json:"id"`
+	TenantID  string    `json:"tenant_id"`
+	Name      string    `json:"name"`
+	Code      string    `json:"code"`
+	ParentID  string    `json:"parent_id"`
+	Level     int       `json:"level"`
+	Path      []string  `json:"path"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type CreateOrganizationRequest struct {
+	TenantID string `json:"tenant_id"`
+	Name     string `json:"name"`
+	Code     string `json:"code"`
+	ParentID string `json:"parent_id"`
 }
 
 type ThreatIntel struct {
@@ -385,6 +408,7 @@ type Alert struct {
 	LastSeenAt      time.Time `json:"last_seen_at"`
 	EventCount      int       `json:"event_count"`
 	ProbeIDs        []string  `json:"probe_ids"`
+	ProbeCount      int       `json:"probe_count"`
 	SrcIP           string    `json:"src_ip"`
 	DstIP           string    `json:"dst_ip"`
 	DstPort         int       `json:"dst_port"`
@@ -394,6 +418,8 @@ type Alert struct {
 	Category        string    `json:"category"`
 	Severity        int       `json:"severity"`
 	RiskScore       int       `json:"risk_score"`
+	AttackResult    string    `json:"attack_result"`
+	WindowMinutes   int       `json:"window_minutes"`
 	Status          string    `json:"status"`
 	Assignee        string    `json:"assignee"`
 	SourceAssetID   string    `json:"source_asset_id"`
@@ -405,27 +431,63 @@ type Alert struct {
 }
 
 type AlertDetail struct {
-	Alert         Alert      `json:"alert"`
-	Events        []RawEvent `json:"events"`
-	ContextEvents []RawEvent `json:"context_events"`
-	Flows         []Flow     `json:"flows"`
-	Tickets       []Ticket   `json:"tickets"`
-	Activities    []Activity `json:"activities"`
+	Alert               Alert               `json:"alert"`
+	Events              []RawEvent          `json:"events"`
+	ContextEvents       []RawEvent          `json:"context_events"`
+	Flows               []Flow              `json:"flows"`
+	Tickets             []Ticket            `json:"tickets"`
+	Activities          []Activity          `json:"activities"`
+	DecisionBasis       AlertDecisionBasis  `json:"decision_basis"`
+	SameSourceTimeline  []AlertTimelineItem `json:"same_source_timeline"`
+	SameTargetTimeline  []AlertTimelineItem `json:"same_target_timeline"`
+	SameFlowTimeline    []AlertTimelineItem `json:"same_flow_timeline"`
+	SimilarSourceAlerts []Alert             `json:"similar_source_alerts"`
+	SimilarTargetAlerts []Alert             `json:"similar_target_alerts"`
+}
+
+type AlertDecisionBasis struct {
+	AttackResult       string   `json:"attack_result"`
+	AttackResultReason string   `json:"attack_result_reason"`
+	ResponseSnippet    string   `json:"response_snippet"`
+	AggregationReason  []string `json:"aggregation_reason"`
+	RiskReason         []string `json:"risk_reason"`
+}
+
+type AlertTimelineItem struct {
+	Timestamp    time.Time `json:"timestamp"`
+	Relation     string    `json:"relation"`
+	ItemKind     string    `json:"item_kind"`
+	EventType    string    `json:"event_type"`
+	Title        string    `json:"title"`
+	Summary      string    `json:"summary"`
+	AlertID      string    `json:"alert_id"`
+	RawEventID   string    `json:"raw_event_id"`
+	FlowID       string    `json:"flow_id"`
+	ProbeID      string    `json:"probe_id"`
+	SrcIP        string    `json:"src_ip"`
+	DstIP        string    `json:"dst_ip"`
+	AttackResult string    `json:"attack_result"`
 }
 
 type AlertQuery struct {
-	TenantID  string    `json:"tenant_id"`
-	Status    string    `json:"status"`
-	Since     time.Time `json:"since"`
-	SrcIP     string    `json:"src_ip"`
-	DstIP     string    `json:"dst_ip"`
-	Signature string    `json:"signature"`
-	Severity  int       `json:"severity"`
-	Assignee  string    `json:"assignee"`
-	SortBy    string    `json:"sort_by"`
-	SortOrder string    `json:"sort_order"`
-	Page      int       `json:"page"`
-	PageSize  int       `json:"page_size"`
+	TenantID        string    `json:"tenant_id"`
+	Status          string    `json:"status"`
+	Since           time.Time `json:"since"`
+	SrcIP           string    `json:"src_ip"`
+	DstIP           string    `json:"dst_ip"`
+	Signature       string    `json:"signature"`
+	Severity        int       `json:"severity"`
+	Assignee        string    `json:"assignee"`
+	AttackResult    string    `json:"attack_result"`
+	MinProbeCount   int       `json:"min_probe_count"`
+	MaxProbeCount   int       `json:"max_probe_count"`
+	MinWindowMins   int       `json:"min_window_mins"`
+	MaxWindowMins   int       `json:"max_window_mins"`
+	AllowedAssetIDs []string  `json:"allowed_asset_ids,omitempty"`
+	SortBy          string    `json:"sort_by"`
+	SortOrder       string    `json:"sort_order"`
+	Page            int       `json:"page"`
+	PageSize        int       `json:"page_size"`
 }
 
 type AlertListResponse struct {
@@ -433,6 +495,53 @@ type AlertListResponse struct {
 	Total    int     `json:"total"`
 	Page     int     `json:"page"`
 	PageSize int     `json:"page_size"`
+}
+
+type RawAlertItem struct {
+	ID           string    `json:"id"`
+	TenantID     string    `json:"tenant_id"`
+	ProbeID      string    `json:"probe_id"`
+	EventTime    time.Time `json:"event_time"`
+	SrcIP        string    `json:"src_ip"`
+	SrcPort      int       `json:"src_port"`
+	DstIP        string    `json:"dst_ip"`
+	DstPort      int       `json:"dst_port"`
+	Proto        string    `json:"proto"`
+	AppProto     string    `json:"app_proto"`
+	FlowID       string    `json:"flow_id"`
+	SignatureID  int       `json:"signature_id"`
+	Signature    string    `json:"signature"`
+	Category     string    `json:"category"`
+	Severity     int       `json:"severity"`
+	AttackResult string    `json:"attack_result"`
+}
+
+type RawAlertQuery struct {
+	TenantID     string    `json:"tenant_id"`
+	Since        time.Time `json:"since"`
+	SrcIP        string    `json:"src_ip"`
+	DstIP        string    `json:"dst_ip"`
+	Signature    string    `json:"signature"`
+	Severity     int       `json:"severity"`
+	ProbeID      string    `json:"probe_id"`
+	AttackResult string    `json:"attack_result"`
+	Page         int       `json:"page"`
+	PageSize     int       `json:"page_size"`
+}
+
+type RawAlertListResponse struct {
+	Items    []RawAlertItem `json:"items"`
+	Total    int            `json:"total"`
+	Page     int            `json:"page"`
+	PageSize int            `json:"page_size"`
+}
+
+type RawAlertDetail struct {
+	Item            RawAlertItem `json:"item"`
+	Event           RawEvent     `json:"event"`
+	ContextEvents   []RawEvent   `json:"context_events"`
+	Flows           []Flow       `json:"flows"`
+	AggregateAlerts []Alert      `json:"aggregate_alerts"`
 }
 
 type Ticket struct {
@@ -474,6 +583,19 @@ type TicketListResponse struct {
 	PageSize int      `json:"page_size"`
 }
 
+type BatchUpdateTicketStatusRequest struct {
+	TenantID  string   `json:"tenant_id"`
+	TicketIDs []string `json:"ticket_ids"`
+	Status    string   `json:"status"`
+	Assignee  string   `json:"assignee"`
+}
+
+type BatchUpdateTicketStatusResponse struct {
+	Requested int      `json:"requested"`
+	Updated   int      `json:"updated"`
+	Items     []Ticket `json:"items"`
+}
+
 type CreateTicketRequest struct {
 	TenantID    string `json:"tenant_id"`
 	AlertID     string `json:"alert_id"`
@@ -481,6 +603,21 @@ type CreateTicketRequest struct {
 	Description string `json:"description"`
 	Priority    string `json:"priority"`
 	Assignee    string `json:"assignee"`
+}
+
+type BatchCreateTicketRequest struct {
+	TenantID    string   `json:"tenant_id"`
+	AlertIDs    []string `json:"alert_ids"`
+	TitlePrefix string   `json:"title_prefix"`
+	Description string   `json:"description"`
+	Priority    string   `json:"priority"`
+	Assignee    string   `json:"assignee"`
+}
+
+type BatchCreateTicketResponse struct {
+	Requested int      `json:"requested"`
+	Created   int      `json:"created"`
+	Items     []Ticket `json:"items"`
 }
 
 type UpdateTicketStatusRequest struct {
@@ -527,6 +664,12 @@ type DashboardStats struct {
 	FlowsObserved int `json:"flows_observed"`
 }
 
+type DashboardWorkbench struct {
+	RoleTemplate RoleTemplate   `json:"role_template"`
+	Stats        DashboardStats `json:"stats"`
+	Recommended  []string       `json:"recommended"`
+}
+
 type TrendPoint struct {
 	Date  string `json:"date"`
 	Count int    `json:"count"`
@@ -540,16 +683,30 @@ type ReportSummary struct {
 }
 
 type FlowQuery struct {
-	TenantID string    `json:"tenant_id"`
-	SrcIP    string    `json:"src_ip"`
-	DstIP    string    `json:"dst_ip"`
-	AppProto string    `json:"app_proto"`
-	Since    time.Time `json:"since"`
+	TenantID   string    `json:"tenant_id"`
+	SrcIP      string    `json:"src_ip"`
+	DstIP      string    `json:"dst_ip"`
+	AppProto   string    `json:"app_proto"`
+	AllowedIPs []string  `json:"allowed_ips,omitempty"`
+	Since      time.Time `json:"since"`
 }
 
 type UpdateAlertStatusRequest struct {
 	Status   string `json:"status"`
 	Assignee string `json:"assignee"`
+}
+
+type BatchUpdateAlertStatusRequest struct {
+	AlertIDs []string `json:"alert_ids"`
+	Status   string   `json:"status"`
+	Assignee string   `json:"assignee"`
+	TenantID string   `json:"tenant_id"`
+}
+
+type BatchUpdateAlertStatusResponse struct {
+	Requested int     `json:"requested"`
+	Updated   int     `json:"updated"`
+	Items     []Alert `json:"items"`
 }
 
 type User struct {
@@ -562,6 +719,8 @@ type User struct {
 	Roles           []string  `json:"roles"`
 	AllowedTenants  []string  `json:"allowed_tenants,omitempty"`
 	AllowedProbeIDs []string  `json:"allowed_probe_ids,omitempty"`
+	AllowedAssetIDs []string  `json:"allowed_asset_ids,omitempty"`
+	AllowedOrgIDs   []string  `json:"allowed_org_ids,omitempty"`
 	Permissions     []string  `json:"permissions,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
 }
@@ -573,6 +732,14 @@ type Role struct {
 	Description string    `json:"description"`
 	Permissions []string  `json:"permissions"`
 	CreatedAt   time.Time `json:"created_at"`
+}
+
+type RoleTemplate struct {
+	Name        string   `json:"name"`
+	Label       string   `json:"label"`
+	Description string   `json:"description"`
+	Permissions []string `json:"permissions"`
+	Modules     []string `json:"modules"`
 }
 
 type AuditLog struct {
@@ -605,6 +772,8 @@ type CreateUserRequest struct {
 	Roles           []string `json:"roles"`
 	AllowedTenants  []string `json:"allowed_tenants"`
 	AllowedProbeIDs []string `json:"allowed_probe_ids"`
+	AllowedAssetIDs []string `json:"allowed_asset_ids"`
+	AllowedOrgIDs   []string `json:"allowed_org_ids"`
 }
 
 type CreateRoleRequest struct {

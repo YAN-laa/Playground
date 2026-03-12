@@ -40,6 +40,43 @@ func (e *LocalEngine) SearchAlerts(ctx context.Context, query shared.AlertQuery)
 	if err != nil {
 		return shared.AlertListResponse{}, err
 	}
+	if len(query.AllowedAssetIDs) > 0 {
+		allowed := make(map[string]struct{}, len(query.AllowedAssetIDs))
+		for _, id := range query.AllowedAssetIDs {
+			allowed[id] = struct{}{}
+		}
+		filtered := make([]shared.Alert, 0, len(items))
+		for _, item := range items {
+			if _, ok := allowed[item.SourceAssetID]; ok {
+				filtered = append(filtered, item)
+				continue
+			}
+			if _, ok := allowed[item.TargetAssetID]; ok {
+				filtered = append(filtered, item)
+			}
+		}
+		items = filtered
+	}
+	filtered := make([]shared.Alert, 0, len(items))
+	for _, item := range items {
+		if query.AttackResult != "" && item.AttackResult != query.AttackResult {
+			continue
+		}
+		if query.MinProbeCount > 0 && item.ProbeCount < query.MinProbeCount {
+			continue
+		}
+		if query.MaxProbeCount > 0 && item.ProbeCount > query.MaxProbeCount {
+			continue
+		}
+		if query.MinWindowMins > 0 && item.WindowMinutes < query.MinWindowMins {
+			continue
+		}
+		if query.MaxWindowMins > 0 && item.WindowMinutes > query.MaxWindowMins {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	items = filtered
 	sortAlerts(items, query.SortBy, query.SortOrder)
 	page, pageSize := normalizePage(query.Page, query.PageSize)
 	return shared.AlertListResponse{
@@ -51,7 +88,28 @@ func (e *LocalEngine) SearchAlerts(ctx context.Context, query shared.AlertQuery)
 }
 
 func (e *LocalEngine) SearchFlows(ctx context.Context, query shared.FlowQuery) ([]shared.Flow, error) {
-	return e.store.ListFlows(ctx, query)
+	items, err := e.store.ListFlows(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	if len(query.AllowedIPs) == 0 {
+		return items, nil
+	}
+	allowed := make(map[string]struct{}, len(query.AllowedIPs))
+	for _, ip := range query.AllowedIPs {
+		allowed[ip] = struct{}{}
+	}
+	filtered := make([]shared.Flow, 0, len(items))
+	for _, item := range items {
+		if _, ok := allowed[item.SrcIP]; ok {
+			filtered = append(filtered, item)
+			continue
+		}
+		if _, ok := allowed[item.DstIP]; ok {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered, nil
 }
 
 type NoopIndexer struct{}

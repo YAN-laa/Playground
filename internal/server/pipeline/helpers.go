@@ -21,14 +21,23 @@ func parseTime(value string) time.Time {
 	return t.UTC()
 }
 
-func fingerprint(tenantID, probeID string, event shared.SuricataEvent) string {
+func fingerprint(tenantID string, eventTime time.Time, aggregationWindow time.Duration, event shared.SuricataEvent) string {
+	bucket := eventTime.UTC()
+	if aggregationWindow > 0 {
+		bucket = bucket.Truncate(aggregationWindow)
+	}
+	appProto := strings.ToLower(strings.TrimSpace(event.AppProto))
+	if appProto == "" {
+		appProto = strings.ToLower(strings.TrimSpace(event.Proto))
+	}
 	raw := strings.Join([]string{
 		tenantID,
-		probeID,
+		bucket.Format(time.RFC3339),
 		event.SrcIP,
 		event.DstIP,
 		fmt.Sprintf("%d", event.DstPort),
-		event.Proto,
+		strings.ToLower(strings.TrimSpace(event.Proto)),
+		appProto,
 		fmt.Sprintf("%d", event.Alert.SignatureID),
 	}, "|")
 	sum := sha1.Sum([]byte(raw))

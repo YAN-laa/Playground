@@ -5,6 +5,7 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"path/filepath"
@@ -45,6 +46,7 @@ func (r *Router) register() {
 	r.mux.Handle("/", http.FileServer(http.FS(webSub)))
 	r.mux.HandleFunc("GET /healthz", r.handleHealth)
 	r.mux.HandleFunc("GET /api/v1/dashboard/stats", r.handleDashboardStats)
+	r.mux.HandleFunc("GET /api/v1/dashboard/workbench", r.handleDashboardWorkbench)
 	r.mux.HandleFunc("GET /api/v1/reports/summary", r.handleReportSummary)
 	r.mux.HandleFunc("POST /api/v1/probes/register", r.handleRegisterProbe)
 	r.mux.HandleFunc("POST /api/v1/probes/heartbeat", r.handleHeartbeat)
@@ -63,19 +65,26 @@ func (r *Router) register() {
 	r.mux.HandleFunc("GET /api/v1/deployments", r.handleListDeployments)
 	r.mux.HandleFunc("POST /api/v1/deployments/ack", r.handleAcknowledgeDeployment)
 	r.mux.HandleFunc("POST /api/v1/upgrade-packages", r.handleCreateUpgradePackage)
+	r.mux.HandleFunc("POST /api/v1/upgrade-packages/upload", r.handleUploadUpgradePackage)
 	r.mux.HandleFunc("GET /api/v1/upgrade-packages", r.handleListUpgradePackages)
+	r.mux.HandleFunc("GET /api/v1/upgrade-packages/{id}/download", r.handleDownloadUpgradePackage)
 	r.mux.HandleFunc("POST /api/v1/probe-upgrades", r.handleCreateProbeUpgradeTask)
 	r.mux.HandleFunc("POST /api/v1/probe-upgrades/batch", r.handleBatchCreateProbeUpgradeTask)
 	r.mux.HandleFunc("GET /api/v1/probe-upgrades", r.handleListProbeUpgradeTasks)
 	r.mux.HandleFunc("POST /api/v1/probe-upgrades/ack", r.handleAcknowledgeProbeUpgradeTask)
 	r.mux.HandleFunc("POST /api/v1/events/ingest", r.handleIngest)
 	r.mux.HandleFunc("GET /api/v1/alerts", r.handleListAlerts)
+	r.mux.HandleFunc("GET /api/v1/raw-alerts", r.handleListRawAlerts)
+	r.mux.HandleFunc("GET /api/v1/raw-alerts/{id}/detail", r.handleGetRawAlertDetail)
+	r.mux.HandleFunc("POST /api/v1/alerts/batch", r.handleBatchUpdateAlerts)
 	r.mux.HandleFunc("GET /api/v1/alerts/{id}", r.handleGetAlert)
 	r.mux.HandleFunc("GET /api/v1/alerts/{id}/detail", r.handleGetAlertDetail)
 	r.mux.HandleFunc("PATCH /api/v1/alerts/{id}", r.handleUpdateAlert)
 	r.mux.HandleFunc("GET /api/v1/flows", r.handleListFlows)
 	r.mux.HandleFunc("POST /api/v1/assets", r.handleCreateAsset)
 	r.mux.HandleFunc("GET /api/v1/assets", r.handleListAssets)
+	r.mux.HandleFunc("POST /api/v1/organizations", r.handleCreateOrganization)
+	r.mux.HandleFunc("GET /api/v1/organizations", r.handleListOrganizations)
 	r.mux.HandleFunc("POST /api/v1/threat-intel", r.handleCreateThreatIntel)
 	r.mux.HandleFunc("GET /api/v1/threat-intel", r.handleListThreatIntel)
 	r.mux.HandleFunc("POST /api/v1/suppression-rules", r.handleCreateSuppressionRule)
@@ -85,13 +94,16 @@ func (r *Router) register() {
 	r.mux.HandleFunc("POST /api/v1/ticket-automation-policies", r.handleCreateTicketAutomationPolicy)
 	r.mux.HandleFunc("GET /api/v1/ticket-automation-policies", r.handleListTicketAutomationPolicies)
 	r.mux.HandleFunc("POST /api/v1/tickets", r.handleCreateTicket)
+	r.mux.HandleFunc("POST /api/v1/tickets/batch", r.handleBatchCreateTickets)
 	r.mux.HandleFunc("GET /api/v1/tickets", r.handleListTickets)
 	r.mux.HandleFunc("GET /api/v1/tickets/{id}", r.handleGetTicket)
 	r.mux.HandleFunc("PATCH /api/v1/tickets/{id}", r.handleUpdateTicket)
+	r.mux.HandleFunc("POST /api/v1/tickets/batch-update", r.handleBatchUpdateTickets)
 	r.mux.HandleFunc("POST /api/v1/auth/login", r.handleLogin)
 	r.mux.HandleFunc("GET /api/v1/auth/me", r.handleCurrentUser)
 	r.mux.HandleFunc("POST /api/v1/users", r.handleCreateUser)
 	r.mux.HandleFunc("GET /api/v1/users", r.handleListUsers)
+	r.mux.HandleFunc("GET /api/v1/role-templates", r.handleListRoleTemplates)
 	r.mux.HandleFunc("POST /api/v1/roles", r.handleCreateRole)
 	r.mux.HandleFunc("GET /api/v1/roles", r.handleListRoles)
 	r.mux.HandleFunc("GET /api/v1/audit/logs", r.handleListAuditLogs)
@@ -117,12 +129,26 @@ func (r *Router) handleDashboardStats(w http.ResponseWriter, req *http.Request) 
 	if !ok {
 		return
 	}
-	stats, err := r.service.DashboardStats(req.Context(), tenantID)
+	stats, err := r.service.DashboardStatsForUser(req.Context(), operator, tenantID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, stats)
+}
+
+func (r *Router) handleDashboardWorkbench(w http.ResponseWriter, req *http.Request) {
+	operator := currentUser(req.Context())
+	if operator.ID == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "not authenticated"})
+		return
+	}
+	workbench, err := r.service.DashboardWorkbench(req.Context(), operator)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, workbench)
 }
 
 func (r *Router) handleReportSummary(w http.ResponseWriter, req *http.Request) {
@@ -140,7 +166,7 @@ func (r *Router) handleReportSummary(w http.ResponseWriter, req *http.Request) {
 		}
 		since = parsed
 	}
-	report, err := r.service.ReportSummary(req.Context(), tenantID, since)
+	report, err := r.service.ReportSummaryForUser(req.Context(), operator, tenantID, since)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -480,6 +506,44 @@ func (r *Router) handleCreateUpgradePackage(w http.ResponseWriter, req *http.Req
 	writeJSON(w, http.StatusCreated, pkg)
 }
 
+func (r *Router) handleUploadUpgradePackage(w http.ResponseWriter, req *http.Request) {
+	operator := currentUser(req.Context())
+	if err := req.ParseMultipartForm(64 << 20); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	tenantID, ok := scopedTenantOrDeny(w, operator, r.service, req.FormValue("tenant_id"))
+	if !ok {
+		return
+	}
+	file, header, err := req.FormFile("package")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "package file is required"})
+		return
+	}
+	defer file.Close()
+	content, err := io.ReadAll(file)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	pkg, err := r.service.UploadUpgradePackage(
+		req.Context(),
+		tenantID,
+		req.FormValue("version"),
+		req.FormValue("notes"),
+		header.Filename,
+		strings.EqualFold(req.FormValue("enabled"), "true"),
+		content,
+		operator.ID,
+	)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, pkg)
+}
+
 func (r *Router) handleListUpgradePackages(w http.ResponseWriter, req *http.Request) {
 	operator := currentUser(req.Context())
 	tenantID, ok := scopedTenantOrDeny(w, operator, r.service, req.URL.Query().Get("tenant_id"))
@@ -492,6 +556,28 @@ func (r *Router) handleListUpgradePackages(w http.ResponseWriter, req *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, items)
+}
+
+func (r *Router) handleDownloadUpgradePackage(w http.ResponseWriter, req *http.Request) {
+	operator := currentUser(req.Context())
+	tenantID := req.URL.Query().Get("tenant_id")
+	if tenantID == "" {
+		tenantID = operator.TenantID
+	}
+	tenantID, ok := scopedTenantOrDeny(w, operator, r.service, tenantID)
+	if !ok {
+		return
+	}
+	pkg, found, err := r.service.GetUpgradePackage(req.Context(), tenantID, req.PathValue("id"))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if !found {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "upgrade package not found"})
+		return
+	}
+	http.ServeFile(w, req, r.service.UpgradePackagePath(pkg))
 }
 
 func (r *Router) handleBatchCreateProbeUpgradeTask(w http.ResponseWriter, req *http.Request) {
@@ -609,9 +695,14 @@ func (r *Router) handleListAlerts(w http.ResponseWriter, req *http.Request) {
 			query.Severity = severity
 		}
 	}
+	query.AttackResult = req.URL.Query().Get("attack_result")
+	query.MinProbeCount = parseIntDefault(req.URL.Query().Get("min_probe_count"), 0)
+	query.MaxProbeCount = parseIntDefault(req.URL.Query().Get("max_probe_count"), 0)
+	query.MinWindowMins = parseIntDefault(req.URL.Query().Get("min_window_mins"), 0)
+	query.MaxWindowMins = parseIntDefault(req.URL.Query().Get("max_window_mins"), 0)
 	query.Page = parseIntDefault(req.URL.Query().Get("page"), 1)
 	query.PageSize = parseIntDefault(req.URL.Query().Get("page_size"), 10)
-	alerts, err := r.service.SearchAlerts(req.Context(), query)
+	alerts, err := r.service.SearchAlertsForUser(req.Context(), operator, query)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -646,6 +737,44 @@ func (r *Router) handleListAlerts(w http.ResponseWriter, req *http.Request) {
 	writeJSON(w, http.StatusOK, alerts)
 }
 
+func (r *Router) handleListRawAlerts(w http.ResponseWriter, req *http.Request) {
+	operator := currentUser(req.Context())
+	tenantID, ok := scopedTenantOrDeny(w, operator, r.service, req.URL.Query().Get("tenant_id"))
+	if !ok {
+		return
+	}
+	query := shared.RawAlertQuery{
+		TenantID:     tenantID,
+		SrcIP:        req.URL.Query().Get("src_ip"),
+		DstIP:        req.URL.Query().Get("dst_ip"),
+		Signature:    req.URL.Query().Get("signature"),
+		ProbeID:      req.URL.Query().Get("probe_id"),
+		AttackResult: req.URL.Query().Get("attack_result"),
+		Page:         parseIntDefault(req.URL.Query().Get("page"), 1),
+		PageSize:     parseIntDefault(req.URL.Query().Get("page_size"), 20),
+	}
+	if raw := req.URL.Query().Get("severity"); raw != "" {
+		var severity int
+		if _, err := fmt.Sscanf(raw, "%d", &severity); err == nil {
+			query.Severity = severity
+		}
+	}
+	if raw := req.URL.Query().Get("since"); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid since"})
+			return
+		}
+		query.Since = parsed
+	}
+	result, err := r.service.SearchRawAlertsForUser(req.Context(), operator, query)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (r *Router) handleGetAlert(w http.ResponseWriter, req *http.Request) {
 	operator := currentUser(req.Context())
 	id := req.PathValue("id")
@@ -660,6 +789,10 @@ func (r *Router) handleGetAlert(w http.ResponseWriter, req *http.Request) {
 	}
 	if !r.service.CanAccessTenant(operator, alert.TenantID) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "tenant access denied"})
+		return
+	}
+	if !r.service.CanAccessAlert(req.Context(), operator, alert) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "alert access denied"})
 		return
 	}
 	writeJSON(w, http.StatusOK, alert)
@@ -683,7 +816,7 @@ func (r *Router) handleListFlows(w http.ResponseWriter, req *http.Request) {
 			query.Since = parsed
 		}
 	}
-	flows, err := r.service.ListFlows(req.Context(), query)
+	flows, err := r.service.ListFlowsForUser(req.Context(), operator, query)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -729,7 +862,53 @@ func (r *Router) handleListAssets(w http.ResponseWriter, req *http.Request) {
 	if !ok {
 		return
 	}
-	items, err := r.service.ListAssets(req.Context(), tenantID)
+	items, err := r.service.ListAssetsForUser(req.Context(), operator, tenantID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (r *Router) handleGetRawAlertDetail(w http.ResponseWriter, req *http.Request) {
+	operator := currentUser(req.Context())
+	id := req.PathValue("id")
+	detail, ok, err := r.service.GetRawAlertDetail(req.Context(), operator, id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "raw alert not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, detail)
+}
+
+func (r *Router) handleCreateOrganization(w http.ResponseWriter, req *http.Request) {
+	var body shared.CreateOrganizationRequest
+	if !decodeJSON(req, &body, w) {
+		return
+	}
+	operator := currentUser(req.Context())
+	if _, ok := scopedTenantOrDeny(w, operator, r.service, body.TenantID); !ok {
+		return
+	}
+	item, err := r.service.CreateOrganization(req.Context(), body, operator.ID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, item)
+}
+
+func (r *Router) handleListOrganizations(w http.ResponseWriter, req *http.Request) {
+	operator := currentUser(req.Context())
+	tenantID, ok := scopedTenantOrDeny(w, operator, r.service, req.URL.Query().Get("tenant_id"))
+	if !ok {
+		return
+	}
+	items, err := r.service.ListOrganizationsForUser(req.Context(), operator, tenantID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -970,7 +1149,7 @@ func (r *Router) handleListExportTasks(w http.ResponseWriter, req *http.Request)
 	if !ok {
 		return
 	}
-	items, err := r.service.ListExportTasks(req.Context(), tenantID)
+	items, err := r.service.ListExportTasksForUser(req.Context(), operator, tenantID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -1001,6 +1180,10 @@ func (r *Router) handleGetExportTask(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 	}
+	if !containsString(operator.Permissions, "*") && task.UserID != operator.ID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "export task access denied"})
+		return
+	}
 	writeJSON(w, http.StatusOK, task)
 }
 
@@ -1027,6 +1210,10 @@ func (r *Router) handleDownloadExportTask(w http.ResponseWriter, req *http.Reque
 			return
 		}
 	}
+	if !containsString(operator.Permissions, "*") && task.UserID != operator.ID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "export task access denied"})
+		return
+	}
 	if task.Status != "completed" || task.FilePath == "" {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "export task not ready"})
 		return
@@ -1051,6 +1238,28 @@ func (r *Router) handleGetAlertDetail(w http.ResponseWriter, req *http.Request) 
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "tenant access denied"})
 		return
 	}
+	if !r.service.CanAccessAlert(req.Context(), operator, detail.Alert) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "alert access denied"})
+		return
+	}
+	if len(detail.SimilarSourceAlerts) > 0 {
+		filtered := make([]shared.Alert, 0, len(detail.SimilarSourceAlerts))
+		for _, item := range detail.SimilarSourceAlerts {
+			if r.service.CanAccessAlert(req.Context(), operator, item) {
+				filtered = append(filtered, item)
+			}
+		}
+		detail.SimilarSourceAlerts = filtered
+	}
+	if len(detail.SimilarTargetAlerts) > 0 {
+		filtered := make([]shared.Alert, 0, len(detail.SimilarTargetAlerts))
+		for _, item := range detail.SimilarTargetAlerts {
+			if r.service.CanAccessAlert(req.Context(), operator, item) {
+				filtered = append(filtered, item)
+			}
+		}
+		detail.SimilarTargetAlerts = filtered
+	}
 	writeJSON(w, http.StatusOK, detail)
 }
 
@@ -1070,6 +1279,29 @@ func (r *Router) handleUpdateAlert(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, alert)
+}
+
+func (r *Router) handleBatchUpdateAlerts(w http.ResponseWriter, req *http.Request) {
+	var body shared.BatchUpdateAlertStatusRequest
+	if !decodeJSON(req, &body, w) {
+		return
+	}
+	operator := currentUser(req.Context())
+	tenantID, ok := scopedTenantOrDeny(w, operator, r.service, body.TenantID)
+	if !ok {
+		return
+	}
+	body.TenantID = tenantID
+	if len(body.AlertIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "alert_ids is required"})
+		return
+	}
+	result, err := r.service.BatchUpdateAlertStatus(req.Context(), body)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (r *Router) handleCreateTicket(w http.ResponseWriter, req *http.Request) {
@@ -1093,6 +1325,23 @@ func (r *Router) handleCreateTicket(w http.ResponseWriter, req *http.Request) {
 	writeJSON(w, http.StatusCreated, ticket)
 }
 
+func (r *Router) handleBatchCreateTickets(w http.ResponseWriter, req *http.Request) {
+	var body shared.BatchCreateTicketRequest
+	if !decodeJSON(req, &body, w) {
+		return
+	}
+	operator := currentUser(req.Context())
+	if _, ok := scopedTenantOrDeny(w, operator, r.service, body.TenantID); !ok {
+		return
+	}
+	result, err := r.service.BatchCreateTickets(req.Context(), body)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, result)
+}
+
 func (r *Router) handleListTickets(w http.ResponseWriter, req *http.Request) {
 	operator := currentUser(req.Context())
 	tenantID, ok := scopedTenantOrDeny(w, operator, r.service, req.URL.Query().Get("tenant_id"))
@@ -1112,7 +1361,7 @@ func (r *Router) handleListTickets(w http.ResponseWriter, req *http.Request) {
 			query.Since = parsed
 		}
 	}
-	tickets, err := r.service.ListTickets(req.Context(), query)
+	tickets, err := r.service.ListTicketsForUser(req.Context(), operator, query)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -1136,6 +1385,10 @@ func (r *Router) handleGetTicket(w http.ResponseWriter, req *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "tenant access denied"})
 		return
 	}
+	if !r.service.CanAccessTicket(req.Context(), operator, detail.Ticket) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "ticket access denied"})
+		return
+	}
 	writeJSON(w, http.StatusOK, detail)
 }
 
@@ -1155,6 +1408,23 @@ func (r *Router) handleUpdateTicket(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, ticket)
+}
+
+func (r *Router) handleBatchUpdateTickets(w http.ResponseWriter, req *http.Request) {
+	var body shared.BatchUpdateTicketStatusRequest
+	if !decodeJSON(req, &body, w) {
+		return
+	}
+	operator := currentUser(req.Context())
+	if _, ok := scopedTenantOrDeny(w, operator, r.service, body.TenantID); !ok {
+		return
+	}
+	result, err := r.service.BatchUpdateTicketStatus(req.Context(), body)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (r *Router) handleLogin(w http.ResponseWriter, req *http.Request) {
@@ -1243,6 +1513,10 @@ func (r *Router) handleListRoles(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, roles)
+}
+
+func (r *Router) handleListRoleTemplates(w http.ResponseWriter, req *http.Request) {
+	writeJSON(w, http.StatusOK, r.service.ListRoleTemplates(req.Context()))
 }
 
 func (r *Router) handleListAuditLogs(w http.ResponseWriter, req *http.Request) {
@@ -1392,6 +1666,8 @@ func requiredPermission(method, path string) string {
 		return ""
 	case method == http.MethodGet && path == "/api/v1/dashboard/stats":
 		return ""
+	case method == http.MethodGet && path == "/api/v1/dashboard/workbench":
+		return ""
 	case method == http.MethodGet && path == "/api/v1/reports/summary":
 		return ""
 	case method == http.MethodGet && path == "/api/v1/probe-configs":
@@ -1416,6 +1692,10 @@ func requiredPermission(method, path string) string {
 		return "probe.read"
 	case method == http.MethodPost && path == "/api/v1/upgrade-packages":
 		return "probe.write"
+	case method == http.MethodPost && path == "/api/v1/upgrade-packages/upload":
+		return "probe.write"
+	case method == http.MethodGet && strings.HasPrefix(path, "/api/v1/upgrade-packages/") && strings.HasSuffix(path, "/download"):
+		return "probe.read"
 	case method == http.MethodGet && path == "/api/v1/probe-upgrades":
 		return "probe.read"
 	case method == http.MethodPost && path == "/api/v1/probe-upgrades":
@@ -1428,6 +1708,8 @@ func requiredPermission(method, path string) string {
 		return ""
 	case method == http.MethodGet && strings.HasPrefix(path, "/api/v1/alerts"):
 		return "alert.read"
+	case method == http.MethodPost && path == "/api/v1/alerts/batch":
+		return "alert.write"
 	case method == http.MethodPatch && strings.HasPrefix(path, "/api/v1/alerts/"):
 		return "alert.write"
 	case method == http.MethodGet && path == "/api/v1/flows":
@@ -1435,6 +1717,10 @@ func requiredPermission(method, path string) string {
 	case method == http.MethodGet && path == "/api/v1/assets":
 		return "asset.read"
 	case method == http.MethodPost && path == "/api/v1/assets":
+		return "asset.write"
+	case method == http.MethodGet && path == "/api/v1/organizations":
+		return "asset.read"
+	case method == http.MethodPost && path == "/api/v1/organizations":
 		return "asset.write"
 	case method == http.MethodGet && path == "/api/v1/threat-intel":
 		return "intel.read"
@@ -1456,14 +1742,20 @@ func requiredPermission(method, path string) string {
 		return "ticket.read"
 	case method == http.MethodPost && path == "/api/v1/tickets":
 		return "ticket.write"
+	case method == http.MethodPost && path == "/api/v1/tickets/batch":
+		return "ticket.write"
 	case method == http.MethodGet && strings.HasPrefix(path, "/api/v1/tickets/"):
 		return "ticket.read"
 	case method == http.MethodPatch && strings.HasPrefix(path, "/api/v1/tickets/"):
+		return "ticket.write"
+	case method == http.MethodPost && path == "/api/v1/tickets/batch-update":
 		return "ticket.write"
 	case method == http.MethodGet && path == "/api/v1/users":
 		return "user.read"
 	case method == http.MethodPost && path == "/api/v1/users":
 		return "user.write"
+	case method == http.MethodGet && path == "/api/v1/role-templates":
+		return ""
 	case method == http.MethodGet && path == "/api/v1/roles":
 		return "role.read"
 	case method == http.MethodPost && path == "/api/v1/roles":

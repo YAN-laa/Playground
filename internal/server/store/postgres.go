@@ -103,6 +103,8 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 			tenant_id text not null,
 			version text not null,
 			package_url text not null,
+			file_name text not null default '',
+			file_size bigint not null default 0,
 			checksum text not null,
 			notes text not null,
 			enabled boolean not null,
@@ -172,10 +174,22 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 			tenant_id text not null,
 			name text not null,
 			ip text not null,
+			org_id text not null default '',
+			org_name text not null default '',
 			asset_type text not null,
 			importance_level text not null,
 			owner text not null,
 			tags jsonb not null,
+			created_at timestamptz not null
+		)`,
+		`create table if not exists organizations (
+			id text primary key,
+			tenant_id text not null,
+			name text not null,
+			code text not null,
+			parent_id text not null default '',
+			level integer not null default 1,
+			path jsonb not null,
 			created_at timestamptz not null
 		)`,
 		`create table if not exists threat_intel (
@@ -231,6 +245,7 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 			last_seen_at timestamptz not null,
 			event_count integer not null,
 			probe_ids jsonb not null,
+			probe_count integer not null default 1,
 			src_ip text not null,
 			dst_ip text not null,
 			dst_port integer not null,
@@ -240,6 +255,8 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 			category text not null,
 			severity integer not null,
 			risk_score integer not null,
+			attack_result text not null default 'unknown',
+			window_minutes integer not null default 0,
 			status text not null,
 			assignee text not null,
 			source_asset_id text not null default '',
@@ -274,6 +291,8 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 			roles jsonb not null,
 			allowed_tenants jsonb not null default '[]',
 			allowed_probe_ids jsonb not null default '[]',
+			allowed_asset_ids jsonb not null default '[]',
+			allowed_org_ids jsonb not null default '[]',
 			created_at timestamptz not null,
 			unique(tenant_id, username)
 		)`,
@@ -377,6 +396,8 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 		`create index if not exists idx_probe_version_history_tenant_probe_created on probe_version_history (tenant_id, probe_id, created_at desc)`,
 		`create index if not exists idx_probe_metrics_tenant_probe_created on probe_metrics (tenant_id, probe_id, created_at desc)`,
 		`create index if not exists idx_assets_tenant_ip on assets (tenant_id, ip)`,
+		`create index if not exists idx_assets_tenant_org on assets (tenant_id, org_id, created_at desc)`,
+		`create index if not exists idx_organizations_tenant_parent on organizations (tenant_id, parent_id, created_at asc)`,
 		`create index if not exists idx_threat_intel_tenant_value on threat_intel (tenant_id, value)`,
 		`create index if not exists idx_suppression_rules_tenant_created on suppression_rules (tenant_id, created_at desc)`,
 		`create index if not exists idx_risk_policies_tenant_created on risk_policies (tenant_id, created_at desc)`,
@@ -398,14 +419,25 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 		`alter table if exists probe_upgrade_tasks add column if not exists retry_count integer not null default 0`,
 		`alter table if exists probe_upgrade_tasks add column if not exists max_retries integer not null default 0`,
 		`alter table if exists probe_upgrade_tasks add column if not exists package_id text not null default ''`,
+		`alter table if exists upgrade_packages add column if not exists file_name text not null default ''`,
+		`alter table if exists upgrade_packages add column if not exists file_size bigint not null default 0`,
 		`alter table if exists users add column if not exists allowed_tenants jsonb not null default '[]'`,
 		`alter table if exists users add column if not exists allowed_probe_ids jsonb not null default '[]'`,
+		`alter table if exists users add column if not exists allowed_asset_ids jsonb not null default '[]'`,
+		`alter table if exists users add column if not exists allowed_org_ids jsonb not null default '[]'`,
+		`alter table if exists assets add column if not exists org_id text not null default ''`,
+		`alter table if exists assets add column if not exists org_name text not null default ''`,
 		`alter table if exists alerts add column if not exists source_asset_id text not null default ''`,
 		`alter table if exists alerts add column if not exists source_asset_name text not null default ''`,
 		`alter table if exists alerts add column if not exists target_asset_id text not null default ''`,
 		`alter table if exists alerts add column if not exists target_asset_name text not null default ''`,
 		`alter table if exists alerts add column if not exists threat_intel_tags jsonb not null default '[]'`,
 		`alter table if exists alerts add column if not exists threat_intel_hits jsonb not null default '[]'`,
+		`alter table if exists alerts add column if not exists attack_result text not null default 'unknown'`,
+		`alter table if exists alerts add column if not exists probe_count integer not null default 1`,
+		`alter table if exists alerts add column if not exists window_minutes integer not null default 0`,
+		`update alerts set probe_count = greatest(1, coalesce(jsonb_array_length(probe_ids), 1))`,
+		`update alerts set window_minutes = case when last_seen_at > first_seen_at then greatest(1, ceil(extract(epoch from (last_seen_at - first_seen_at)) / 60.0)::int) else 0 end`,
 		`alter table if exists notification_records add column if not exists retry_count integer not null default 0`,
 		`alter table if exists notification_records add column if not exists next_retry_at timestamptz`,
 	}
@@ -700,13 +732,13 @@ func (s *PostgresStore) UpdateProbeUpgradeTask(ctx context.Context, task shared.
 }
 
 func (s *PostgresStore) CreateUpgradePackage(ctx context.Context, pkg shared.UpgradePackage) (shared.UpgradePackage, error) {
-	_, err := s.pool.Exec(ctx, `insert into upgrade_packages (id, tenant_id, version, package_url, checksum, notes, enabled, created_at) values ($1,$2,$3,$4,$5,$6,$7,$8)`,
-		pkg.ID, pkg.TenantID, pkg.Version, pkg.PackageURL, pkg.Checksum, pkg.Notes, pkg.Enabled, pkg.CreatedAt)
+	_, err := s.pool.Exec(ctx, `insert into upgrade_packages (id, tenant_id, version, package_url, file_name, file_size, checksum, notes, enabled, created_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		pkg.ID, pkg.TenantID, pkg.Version, pkg.PackageURL, pkg.FileName, pkg.FileSize, pkg.Checksum, pkg.Notes, pkg.Enabled, pkg.CreatedAt)
 	return pkg, err
 }
 
 func (s *PostgresStore) ListUpgradePackages(ctx context.Context, tenantID string) ([]shared.UpgradePackage, error) {
-	rows, err := s.pool.Query(ctx, `select id, tenant_id, version, package_url, checksum, notes, enabled, created_at from upgrade_packages where ($1='' or tenant_id=$1) order by created_at desc`, tenantID)
+	rows, err := s.pool.Query(ctx, `select id, tenant_id, version, package_url, file_name, file_size, checksum, notes, enabled, created_at from upgrade_packages where ($1='' or tenant_id=$1) order by created_at desc`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -714,7 +746,7 @@ func (s *PostgresStore) ListUpgradePackages(ctx context.Context, tenantID string
 	out := make([]shared.UpgradePackage, 0)
 	for rows.Next() {
 		var item shared.UpgradePackage
-		if err := rows.Scan(&item.ID, &item.TenantID, &item.Version, &item.PackageURL, &item.Checksum, &item.Notes, &item.Enabled, &item.CreatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.TenantID, &item.Version, &item.PackageURL, &item.FileName, &item.FileSize, &item.Checksum, &item.Notes, &item.Enabled, &item.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, item)
@@ -722,10 +754,20 @@ func (s *PostgresStore) ListUpgradePackages(ctx context.Context, tenantID string
 	return out, rows.Err()
 }
 
-func (s *PostgresStore) FindUpgradePackageByVersion(ctx context.Context, tenantID, version string) (shared.UpgradePackage, bool, error) {
-	row := s.pool.QueryRow(ctx, `select id, tenant_id, version, package_url, checksum, notes, enabled, created_at from upgrade_packages where tenant_id=$1 and version=$2 order by created_at desc limit 1`, tenantID, version)
+func (s *PostgresStore) FindUpgradePackageByID(ctx context.Context, tenantID, id string) (shared.UpgradePackage, bool, error) {
+	row := s.pool.QueryRow(ctx, `select id, tenant_id, version, package_url, file_name, file_size, checksum, notes, enabled, created_at from upgrade_packages where tenant_id=$1 and id=$2`, tenantID, id)
 	var item shared.UpgradePackage
-	err := row.Scan(&item.ID, &item.TenantID, &item.Version, &item.PackageURL, &item.Checksum, &item.Notes, &item.Enabled, &item.CreatedAt)
+	err := row.Scan(&item.ID, &item.TenantID, &item.Version, &item.PackageURL, &item.FileName, &item.FileSize, &item.Checksum, &item.Notes, &item.Enabled, &item.CreatedAt)
+	if err == pgx.ErrNoRows {
+		return shared.UpgradePackage{}, false, nil
+	}
+	return item, err == nil, err
+}
+
+func (s *PostgresStore) FindUpgradePackageByVersion(ctx context.Context, tenantID, version string) (shared.UpgradePackage, bool, error) {
+	row := s.pool.QueryRow(ctx, `select id, tenant_id, version, package_url, file_name, file_size, checksum, notes, enabled, created_at from upgrade_packages where tenant_id=$1 and version=$2 order by created_at desc limit 1`, tenantID, version)
+	var item shared.UpgradePackage
+	err := row.Scan(&item.ID, &item.TenantID, &item.Version, &item.PackageURL, &item.FileName, &item.FileSize, &item.Checksum, &item.Notes, &item.Enabled, &item.CreatedAt)
 	if err == pgx.ErrNoRows {
 		return shared.UpgradePackage{}, false, nil
 	}
@@ -923,13 +965,13 @@ func (s *PostgresStore) CreateAsset(ctx context.Context, asset shared.Asset) (sh
 	if err != nil {
 		return shared.Asset{}, err
 	}
-	_, err = s.pool.Exec(ctx, `insert into assets (id, tenant_id, name, ip, asset_type, importance_level, owner, tags, created_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-		asset.ID, asset.TenantID, asset.Name, asset.IP, asset.AssetType, asset.ImportanceLevel, asset.Owner, tags, asset.CreatedAt)
+	_, err = s.pool.Exec(ctx, `insert into assets (id, tenant_id, name, ip, org_id, org_name, asset_type, importance_level, owner, tags, created_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+		asset.ID, asset.TenantID, asset.Name, asset.IP, asset.OrgID, asset.OrgName, asset.AssetType, asset.ImportanceLevel, asset.Owner, tags, asset.CreatedAt)
 	return asset, err
 }
 
 func (s *PostgresStore) ListAssets(ctx context.Context, tenantID string) ([]shared.Asset, error) {
-	rows, err := s.pool.Query(ctx, `select id, tenant_id, name, ip, asset_type, importance_level, owner, tags, created_at from assets where ($1='' or tenant_id=$1) order by created_at desc`, tenantID)
+	rows, err := s.pool.Query(ctx, `select id, tenant_id, name, ip, org_id, org_name, asset_type, importance_level, owner, tags, created_at from assets where ($1='' or tenant_id=$1) order by created_at desc`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -948,8 +990,42 @@ func (s *PostgresStore) ListAssets(ctx context.Context, tenantID string) ([]shar
 }
 
 func (s *PostgresStore) FindAssetByIP(ctx context.Context, tenantID, ip string) (shared.Asset, bool, error) {
-	row := s.pool.QueryRow(ctx, `select id, tenant_id, name, ip, asset_type, importance_level, owner, tags, created_at from assets where tenant_id=$1 and ip=$2 limit 1`, tenantID, ip)
+	row := s.pool.QueryRow(ctx, `select id, tenant_id, name, ip, org_id, org_name, asset_type, importance_level, owner, tags, created_at from assets where tenant_id=$1 and ip=$2 limit 1`, tenantID, ip)
 	return scanAsset(row)
+}
+
+func (s *PostgresStore) CreateOrganization(ctx context.Context, org shared.Organization) (shared.Organization, error) {
+	pathRaw, err := json.Marshal(org.Path)
+	if err != nil {
+		return shared.Organization{}, err
+	}
+	_, err = s.pool.Exec(ctx, `insert into organizations (id, tenant_id, name, code, parent_id, level, path, created_at) values ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		org.ID, org.TenantID, org.Name, org.Code, org.ParentID, org.Level, pathRaw, org.CreatedAt)
+	return org, err
+}
+
+func (s *PostgresStore) ListOrganizations(ctx context.Context, tenantID string) ([]shared.Organization, error) {
+	rows, err := s.pool.Query(ctx, `select id, tenant_id, name, code, parent_id, level, path, created_at from organizations where ($1='' or tenant_id=$1) order by level asc, created_at asc`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]shared.Organization, 0)
+	for rows.Next() {
+		item, ok, err := scanOrganization(rows)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			out = append(out, item)
+		}
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) GetOrganization(ctx context.Context, id string) (shared.Organization, bool, error) {
+	row := s.pool.QueryRow(ctx, `select id, tenant_id, name, code, parent_id, level, path, created_at from organizations where id=$1`, id)
+	return scanOrganization(row)
 }
 
 func (s *PostgresStore) CreateThreatIntel(ctx context.Context, intel shared.ThreatIntel) (shared.ThreatIntel, error) {
@@ -1076,7 +1152,7 @@ func (s *PostgresStore) UpsertAlertByFingerprint(ctx context.Context, fp string,
 	}
 	defer tx.Rollback(ctx)
 
-	row := tx.QueryRow(ctx, `select id, tenant_id, fingerprint, first_seen_at, last_seen_at, event_count, probe_ids, src_ip, dst_ip, dst_port, proto, signature_id, signature, category, severity, risk_score, status, assignee, source_asset_id, source_asset_name, target_asset_id, target_asset_name, threat_intel_tags, threat_intel_hits from alerts where fingerprint=$1`, fp)
+	row := tx.QueryRow(ctx, `select id, tenant_id, fingerprint, first_seen_at, last_seen_at, event_count, probe_ids, probe_count, src_ip, dst_ip, dst_port, proto, signature_id, signature, category, severity, risk_score, attack_result, window_minutes, status, assignee, source_asset_id, source_asset_name, target_asset_id, target_asset_name, threat_intel_tags, threat_intel_hits from alerts where fingerprint=$1`, fp)
 	current, ok, err := scanAlert(row)
 	if err != nil {
 		return shared.Alert{}, err
@@ -1100,13 +1176,16 @@ func (s *PostgresStore) UpsertAlertByFingerprint(ctx context.Context, fp string,
 		return shared.Alert{}, err
 	}
 	_, err = tx.Exec(ctx, `
-		insert into alerts (id, tenant_id, fingerprint, first_seen_at, last_seen_at, event_count, probe_ids, src_ip, dst_ip, dst_port, proto, signature_id, signature, category, severity, risk_score, status, assignee, source_asset_id, source_asset_name, target_asset_id, target_asset_name, threat_intel_tags, threat_intel_hits)
-		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+		insert into alerts (id, tenant_id, fingerprint, first_seen_at, last_seen_at, event_count, probe_ids, probe_count, src_ip, dst_ip, dst_port, proto, signature_id, signature, category, severity, risk_score, attack_result, window_minutes, status, assignee, source_asset_id, source_asset_name, target_asset_id, target_asset_name, threat_intel_tags, threat_intel_hits)
+		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
 		on conflict (id) do update set
 			last_seen_at=excluded.last_seen_at,
 			event_count=excluded.event_count,
 			probe_ids=excluded.probe_ids,
+			probe_count=excluded.probe_count,
 			risk_score=excluded.risk_score,
+			attack_result=excluded.attack_result,
+			window_minutes=excluded.window_minutes,
 			status=excluded.status,
 			assignee=excluded.assignee,
 			source_asset_id=excluded.source_asset_id,
@@ -1115,7 +1194,7 @@ func (s *PostgresStore) UpsertAlertByFingerprint(ctx context.Context, fp string,
 			target_asset_name=excluded.target_asset_name,
 			threat_intel_tags=excluded.threat_intel_tags,
 			threat_intel_hits=excluded.threat_intel_hits
-	`, next.ID, next.TenantID, next.Fingerprint, next.FirstSeenAt, next.LastSeenAt, next.EventCount, probeIDs, next.SrcIP, next.DstIP, next.DstPort, next.Proto, next.SignatureID, next.Signature, next.Category, next.Severity, next.RiskScore, next.Status, next.Assignee, next.SourceAssetID, next.SourceAssetName, next.TargetAssetID, next.TargetAssetName, tags, hits)
+	`, next.ID, next.TenantID, next.Fingerprint, next.FirstSeenAt, next.LastSeenAt, next.EventCount, probeIDs, next.ProbeCount, next.SrcIP, next.DstIP, next.DstPort, next.Proto, next.SignatureID, next.Signature, next.Category, next.Severity, next.RiskScore, next.AttackResult, next.WindowMinutes, next.Status, next.Assignee, next.SourceAssetID, next.SourceAssetName, next.TargetAssetID, next.TargetAssetName, tags, hits)
 	if err != nil {
 		return shared.Alert{}, err
 	}
@@ -1126,7 +1205,7 @@ func (s *PostgresStore) UpsertAlertByFingerprint(ctx context.Context, fp string,
 }
 
 func (s *PostgresStore) GetAlert(ctx context.Context, id string) (shared.Alert, bool, error) {
-	row := s.pool.QueryRow(ctx, `select id, tenant_id, fingerprint, first_seen_at, last_seen_at, event_count, probe_ids, src_ip, dst_ip, dst_port, proto, signature_id, signature, category, severity, risk_score, status, assignee, source_asset_id, source_asset_name, target_asset_id, target_asset_name, threat_intel_tags, threat_intel_hits from alerts where id=$1`, id)
+	row := s.pool.QueryRow(ctx, `select id, tenant_id, fingerprint, first_seen_at, last_seen_at, event_count, probe_ids, probe_count, src_ip, dst_ip, dst_port, proto, signature_id, signature, category, severity, risk_score, attack_result, window_minutes, status, assignee, source_asset_id, source_asset_name, target_asset_id, target_asset_name, threat_intel_tags, threat_intel_hits from alerts where id=$1`, id)
 	return scanAlert(row)
 }
 
@@ -1149,7 +1228,7 @@ func (s *PostgresStore) UpdateAlertStatus(ctx context.Context, id string, mutate
 }
 
 func (s *PostgresStore) ListAlerts(ctx context.Context, query shared.AlertQuery) ([]shared.Alert, error) {
-	sql := `select id, tenant_id, fingerprint, first_seen_at, last_seen_at, event_count, probe_ids, src_ip, dst_ip, dst_port, proto, signature_id, signature, category, severity, risk_score, status, assignee, source_asset_id, source_asset_name, target_asset_id, target_asset_name, threat_intel_tags, threat_intel_hits from alerts where 1=1`
+	sql := `select id, tenant_id, fingerprint, first_seen_at, last_seen_at, event_count, probe_ids, probe_count, src_ip, dst_ip, dst_port, proto, signature_id, signature, category, severity, risk_score, attack_result, window_minutes, status, assignee, source_asset_id, source_asset_name, target_asset_id, target_asset_name, threat_intel_tags, threat_intel_hits from alerts where 1=1`
 	args := []any{}
 	idx := 1
 	if query.TenantID != "" {
@@ -1330,13 +1409,21 @@ func (s *PostgresStore) CreateUser(ctx context.Context, user shared.User) (share
 	if err != nil {
 		return shared.User{}, err
 	}
-	_, err = s.pool.Exec(ctx, `insert into users (id, tenant_id, username, display_name, password, status, roles, allowed_tenants, allowed_probe_ids, created_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-		user.ID, user.TenantID, user.Username, user.DisplayName, user.Password, user.Status, roles, allowedTenants, allowedProbeIDs, user.CreatedAt)
+	allowedAssetIDs, err := json.Marshal(user.AllowedAssetIDs)
+	if err != nil {
+		return shared.User{}, err
+	}
+	allowedOrgIDs, err := json.Marshal(user.AllowedOrgIDs)
+	if err != nil {
+		return shared.User{}, err
+	}
+	_, err = s.pool.Exec(ctx, `insert into users (id, tenant_id, username, display_name, password, status, roles, allowed_tenants, allowed_probe_ids, allowed_asset_ids, allowed_org_ids, created_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+		user.ID, user.TenantID, user.Username, user.DisplayName, user.Password, user.Status, roles, allowedTenants, allowedProbeIDs, allowedAssetIDs, allowedOrgIDs, user.CreatedAt)
 	return user, err
 }
 
 func (s *PostgresStore) ListUsers(ctx context.Context, tenantID string) ([]shared.User, error) {
-	query := `select id, tenant_id, username, display_name, password, status, roles, allowed_tenants, allowed_probe_ids, created_at from users`
+	query := `select id, tenant_id, username, display_name, password, status, roles, allowed_tenants, allowed_probe_ids, allowed_asset_ids, allowed_org_ids, created_at from users`
 	args := []any{}
 	if tenantID != "" {
 		query += ` where tenant_id=$1`
@@ -1362,12 +1449,12 @@ func (s *PostgresStore) ListUsers(ctx context.Context, tenantID string) ([]share
 }
 
 func (s *PostgresStore) FindUser(ctx context.Context, tenantID, username string) (shared.User, bool, error) {
-	row := s.pool.QueryRow(ctx, `select id, tenant_id, username, display_name, password, status, roles, allowed_tenants, allowed_probe_ids, created_at from users where tenant_id=$1 and username=$2`, tenantID, username)
+	row := s.pool.QueryRow(ctx, `select id, tenant_id, username, display_name, password, status, roles, allowed_tenants, allowed_probe_ids, allowed_asset_ids, allowed_org_ids, created_at from users where tenant_id=$1 and username=$2`, tenantID, username)
 	return scanUser(row)
 }
 
 func (s *PostgresStore) GetUser(ctx context.Context, id string) (shared.User, bool, error) {
-	row := s.pool.QueryRow(ctx, `select id, tenant_id, username, display_name, password, status, roles, allowed_tenants, allowed_probe_ids, created_at from users where id=$1`, id)
+	row := s.pool.QueryRow(ctx, `select id, tenant_id, username, display_name, password, status, roles, allowed_tenants, allowed_probe_ids, allowed_asset_ids, allowed_org_ids, created_at from users where id=$1`, id)
 	return scanUser(row)
 }
 
@@ -1413,7 +1500,7 @@ func (s *PostgresStore) SaveToken(ctx context.Context, token, userID string) err
 }
 
 func (s *PostgresStore) LookupToken(ctx context.Context, token string) (shared.User, bool, error) {
-	row := s.pool.QueryRow(ctx, `select u.id, u.tenant_id, u.username, u.display_name, u.password, u.status, u.roles, u.created_at
+	row := s.pool.QueryRow(ctx, `select u.id, u.tenant_id, u.username, u.display_name, u.password, u.status, u.roles, u.allowed_tenants, u.allowed_probe_ids, u.allowed_asset_ids, u.allowed_org_ids, u.created_at
 		from auth_tokens t join users u on u.id=t.user_id where t.token=$1`, token)
 	return scanUser(row)
 }
@@ -1627,7 +1714,7 @@ func scanAlert(s scanner) (shared.Alert, bool, error) {
 	var probeIDsRaw []byte
 	var tagsRaw []byte
 	var hitsRaw []byte
-	err := s.Scan(&alert.ID, &alert.TenantID, &alert.Fingerprint, &alert.FirstSeenAt, &alert.LastSeenAt, &alert.EventCount, &probeIDsRaw, &alert.SrcIP, &alert.DstIP, &alert.DstPort, &alert.Proto, &alert.SignatureID, &alert.Signature, &alert.Category, &alert.Severity, &alert.RiskScore, &alert.Status, &alert.Assignee, &alert.SourceAssetID, &alert.SourceAssetName, &alert.TargetAssetID, &alert.TargetAssetName, &tagsRaw, &hitsRaw)
+	err := s.Scan(&alert.ID, &alert.TenantID, &alert.Fingerprint, &alert.FirstSeenAt, &alert.LastSeenAt, &alert.EventCount, &probeIDsRaw, &alert.ProbeCount, &alert.SrcIP, &alert.DstIP, &alert.DstPort, &alert.Proto, &alert.SignatureID, &alert.Signature, &alert.Category, &alert.Severity, &alert.RiskScore, &alert.AttackResult, &alert.WindowMinutes, &alert.Status, &alert.Assignee, &alert.SourceAssetID, &alert.SourceAssetName, &alert.TargetAssetID, &alert.TargetAssetName, &tagsRaw, &hitsRaw)
 	if err == pgx.ErrNoRows {
 		return shared.Alert{}, false, nil
 	}
@@ -1651,7 +1738,9 @@ func scanUser(s scanner) (shared.User, bool, error) {
 	var rolesRaw []byte
 	var allowedTenantsRaw []byte
 	var allowedProbeIDsRaw []byte
-	err := s.Scan(&user.ID, &user.TenantID, &user.Username, &user.DisplayName, &user.Password, &user.Status, &rolesRaw, &allowedTenantsRaw, &allowedProbeIDsRaw, &user.CreatedAt)
+	var allowedAssetIDsRaw []byte
+	var allowedOrgIDsRaw []byte
+	err := s.Scan(&user.ID, &user.TenantID, &user.Username, &user.DisplayName, &user.Password, &user.Status, &rolesRaw, &allowedTenantsRaw, &allowedProbeIDsRaw, &allowedAssetIDsRaw, &allowedOrgIDsRaw, &user.CreatedAt)
 	if err == pgx.ErrNoRows {
 		return shared.User{}, false, nil
 	}
@@ -1666,6 +1755,16 @@ func scanUser(s scanner) (shared.User, bool, error) {
 	}
 	if err := json.Unmarshal(allowedProbeIDsRaw, &user.AllowedProbeIDs); err != nil {
 		return shared.User{}, false, err
+	}
+	if len(allowedAssetIDsRaw) > 0 {
+		if err := json.Unmarshal(allowedAssetIDsRaw, &user.AllowedAssetIDs); err != nil {
+			return shared.User{}, false, err
+		}
+	}
+	if len(allowedOrgIDsRaw) > 0 {
+		if err := json.Unmarshal(allowedOrgIDsRaw, &user.AllowedOrgIDs); err != nil {
+			return shared.User{}, false, err
+		}
 	}
 	return user, true, nil
 }
@@ -1737,7 +1836,7 @@ func scanNotificationTemplate(s scanner) (shared.NotificationTemplate, bool, err
 func scanAsset(s scanner) (shared.Asset, bool, error) {
 	var asset shared.Asset
 	var tagsRaw []byte
-	err := s.Scan(&asset.ID, &asset.TenantID, &asset.Name, &asset.IP, &asset.AssetType, &asset.ImportanceLevel, &asset.Owner, &tagsRaw, &asset.CreatedAt)
+	err := s.Scan(&asset.ID, &asset.TenantID, &asset.Name, &asset.IP, &asset.OrgID, &asset.OrgName, &asset.AssetType, &asset.ImportanceLevel, &asset.Owner, &tagsRaw, &asset.CreatedAt)
 	if err == pgx.ErrNoRows {
 		return shared.Asset{}, false, nil
 	}
@@ -1748,6 +1847,24 @@ func scanAsset(s scanner) (shared.Asset, bool, error) {
 		return shared.Asset{}, false, err
 	}
 	return asset, true, nil
+}
+
+func scanOrganization(s scanner) (shared.Organization, bool, error) {
+	var item shared.Organization
+	var pathRaw []byte
+	err := s.Scan(&item.ID, &item.TenantID, &item.Name, &item.Code, &item.ParentID, &item.Level, &pathRaw, &item.CreatedAt)
+	if err == pgx.ErrNoRows {
+		return shared.Organization{}, false, nil
+	}
+	if err != nil {
+		return shared.Organization{}, false, err
+	}
+	if len(pathRaw) > 0 {
+		if err := json.Unmarshal(pathRaw, &item.Path); err != nil {
+			return shared.Organization{}, false, err
+		}
+	}
+	return item, true, nil
 }
 
 func scanThreatIntel(s scanner) (shared.ThreatIntel, bool, error) {

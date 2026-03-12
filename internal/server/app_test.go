@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -500,6 +501,258 @@ func TestEndToEndFlow(t *testing.T) {
 	}
 }
 
+func TestAlertAttackResultDerivedFromHTTPResponse(t *testing.T) {
+	t.Setenv("APP_EXPORT_DIR", t.TempDir())
+	handler, cleanup, err := NewHandler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	var login shared.LoginResponse
+	doJSON(t, handler, "/api/v1/auth/login", http.MethodPost, shared.LoginRequest{
+		TenantID: "demo-tenant",
+		Username: "admin",
+		Password: "admin123",
+	}, &login, http.StatusOK, "")
+	authHeader := "Bearer " + login.Token
+
+	var probe shared.Probe
+	doJSON(t, handler, "/api/v1/probes/register", http.MethodPost, shared.RegisterProbeRequest{
+		TenantID:    "tenant-http",
+		ProbeCode:   "probe-http-01",
+		Name:        "HTTP Probe",
+		Version:     "0.1.0",
+		RuleVersion: "rules-v1",
+	}, &probe, http.StatusCreated, "")
+
+	now := time.Now().UTC()
+	failBody := base64.StdEncoding.EncodeToString([]byte("<html><h1>404 Not Found</h1></html>"))
+	successBody := base64.StdEncoding.EncodeToString([]byte(`{"ok":true}`))
+
+	doJSON(t, handler, "/api/v1/events/ingest", http.MethodPost, shared.EventBatch{
+		TenantID: "tenant-http",
+		ProbeID:  probe.ID,
+		Events: []shared.SuricataEvent{
+			{
+				Timestamp: now.Format(time.RFC3339),
+				EventType: "alert",
+				SrcIP:     "192.168.2.186",
+				SrcPort:   56077,
+				DstIP:     "192.168.2.88",
+				DstPort:   80,
+				Proto:     "TCP",
+				AppProto:  "http",
+				FlowID:    "flow-http-01",
+				Alert: &shared.SuricataAlert{
+					SignatureID: 2063343,
+					Signature:   "ET EXPLOIT Apache CouchDB",
+					Category:    "Attempted Administrator Privilege Gain",
+					Severity:    1,
+				},
+				Payload: map[string]any{
+					"app_proto": "http",
+					"http": map[string]any{
+						"http_method":        "PUT",
+						"hostname":           "192.168.2.88",
+						"url":                "/_users/test",
+						"status":             404,
+						"http_response_body": failBody,
+					},
+				},
+			},
+			{
+				Timestamp: now.Add(2 * time.Second).Format(time.RFC3339),
+				EventType: "alert",
+				SrcIP:     "192.168.2.186",
+				SrcPort:   56078,
+				DstIP:     "192.168.2.88",
+				DstPort:   80,
+				Proto:     "TCP",
+				AppProto:  "http",
+				FlowID:    "flow-http-02",
+				Alert: &shared.SuricataAlert{
+					SignatureID: 2063343,
+					Signature:   "ET EXPLOIT Apache CouchDB",
+					Category:    "Attempted Administrator Privilege Gain",
+					Severity:    1,
+				},
+				Payload: map[string]any{
+					"app_proto": "http",
+					"http": map[string]any{
+						"http_method":        "PUT",
+						"hostname":           "192.168.2.88",
+						"url":                "/_users/test",
+						"status":             201,
+						"http_response_body": successBody,
+					},
+				},
+			},
+		},
+	}, nil, http.StatusAccepted, "")
+
+	var alerts shared.AlertListResponse
+	doJSON(t, handler, "/api/v1/alerts?tenant_id=tenant-http", http.MethodGet, nil, &alerts, http.StatusOK, authHeader)
+	if len(alerts.Items) != 1 {
+		t.Fatalf("expected 1 aggregated alert, got %d", len(alerts.Items))
+	}
+	if alerts.Items[0].AttackResult != "success" {
+		t.Fatalf("expected attack_result=success, got %s", alerts.Items[0].AttackResult)
+	}
+}
+
+func TestAlertAggregationWindowAndCrossProbe(t *testing.T) {
+	t.Setenv("APP_EXPORT_DIR", t.TempDir())
+	t.Setenv("APP_ALERT_AGG_WINDOW", "1m")
+	handler, cleanup, err := NewHandler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	var login shared.LoginResponse
+	doJSON(t, handler, "/api/v1/auth/login", http.MethodPost, shared.LoginRequest{
+		TenantID: "demo-tenant",
+		Username: "admin",
+		Password: "admin123",
+	}, &login, http.StatusOK, "")
+	authHeader := "Bearer " + login.Token
+
+	var probeA shared.Probe
+	doJSON(t, handler, "/api/v1/probes/register", http.MethodPost, shared.RegisterProbeRequest{
+		TenantID:    "tenant-agg",
+		ProbeCode:   "probe-agg-a",
+		Name:        "Agg A",
+		Version:     "0.1.0",
+		RuleVersion: "rules-v1",
+	}, &probeA, http.StatusCreated, "")
+
+	var probeB shared.Probe
+	doJSON(t, handler, "/api/v1/probes/register", http.MethodPost, shared.RegisterProbeRequest{
+		TenantID:    "tenant-agg",
+		ProbeCode:   "probe-agg-b",
+		Name:        "Agg B",
+		Version:     "0.1.0",
+		RuleVersion: "rules-v1",
+	}, &probeB, http.StatusCreated, "")
+
+	baseTime := time.Date(2026, 3, 11, 10, 0, 0, 0, time.UTC)
+	doJSON(t, handler, "/api/v1/events/ingest", http.MethodPost, shared.EventBatch{
+		TenantID: "tenant-agg",
+		ProbeID:  probeA.ID,
+		Events: []shared.SuricataEvent{{
+			Timestamp: baseTime.Format(time.RFC3339),
+			EventType: "alert",
+			SrcIP:     "10.0.0.9",
+			SrcPort:   41000,
+			DstIP:     "192.168.10.8",
+			DstPort:   445,
+			Proto:     "TCP",
+			AppProto:  "smb",
+			FlowID:    "agg-flow-a",
+			Alert: &shared.SuricataAlert{
+				SignatureID: 9001,
+				Signature:   "Suspicious SMB Lateral Movement",
+				Category:    "Lateral Movement",
+				Severity:    1,
+			},
+		}},
+	}, nil, http.StatusAccepted, "")
+
+	doJSON(t, handler, "/api/v1/events/ingest", http.MethodPost, shared.EventBatch{
+		TenantID: "tenant-agg",
+		ProbeID:  probeB.ID,
+		Events: []shared.SuricataEvent{{
+			Timestamp: baseTime.Add(30 * time.Second).Format(time.RFC3339),
+			EventType: "alert",
+			SrcIP:     "10.0.0.9",
+			SrcPort:   41001,
+			DstIP:     "192.168.10.8",
+			DstPort:   445,
+			Proto:     "TCP",
+			AppProto:  "smb",
+			FlowID:    "agg-flow-b",
+			Alert: &shared.SuricataAlert{
+				SignatureID: 9001,
+				Signature:   "Suspicious SMB Lateral Movement",
+				Category:    "Lateral Movement",
+				Severity:    1,
+			},
+		}},
+	}, nil, http.StatusAccepted, "")
+
+	var alerts shared.AlertListResponse
+	doJSON(t, handler, "/api/v1/alerts?tenant_id=tenant-agg", http.MethodGet, nil, &alerts, http.StatusOK, authHeader)
+	if len(alerts.Items) != 1 {
+		t.Fatalf("expected 1 alert in first window, got %d", len(alerts.Items))
+	}
+	if alerts.Items[0].EventCount != 2 {
+		t.Fatalf("expected event_count=2, got %d", alerts.Items[0].EventCount)
+	}
+	if len(alerts.Items[0].ProbeIDs) != 2 {
+		t.Fatalf("expected 2 probe ids in aggregated alert, got %d", len(alerts.Items[0].ProbeIDs))
+	}
+
+	doJSON(t, handler, "/api/v1/events/ingest", http.MethodPost, shared.EventBatch{
+		TenantID: "tenant-agg",
+		ProbeID:  probeA.ID,
+		Events: []shared.SuricataEvent{{
+			Timestamp: baseTime.Add(2 * time.Minute).Format(time.RFC3339),
+			EventType: "alert",
+			SrcIP:     "10.0.0.9",
+			SrcPort:   41002,
+			DstIP:     "192.168.10.8",
+			DstPort:   445,
+			Proto:     "TCP",
+			AppProto:  "smb",
+			FlowID:    "agg-flow-c",
+			Alert: &shared.SuricataAlert{
+				SignatureID: 9001,
+				Signature:   "Suspicious SMB Lateral Movement",
+				Category:    "Lateral Movement",
+				Severity:    1,
+			},
+		}},
+	}, nil, http.StatusAccepted, "")
+
+	doJSON(t, handler, "/api/v1/alerts?tenant_id=tenant-agg", http.MethodGet, nil, &alerts, http.StatusOK, authHeader)
+	if len(alerts.Items) != 2 {
+		t.Fatalf("expected 2 alerts across time windows, got %d", len(alerts.Items))
+	}
+
+	doJSON(t, handler, "/api/v1/alerts?tenant_id=tenant-agg&min_probe_count=2&min_window_mins=1", http.MethodGet, nil, &alerts, http.StatusOK, authHeader)
+	if len(alerts.Items) != 1 {
+		t.Fatalf("expected 1 alert after aggregation filters, got %d", len(alerts.Items))
+	}
+
+	var rawAlerts shared.RawAlertListResponse
+	doJSON(t, handler, "/api/v1/raw-alerts?tenant_id=tenant-agg&signature=Suspicious%20SMB%20Lateral%20Movement", http.MethodGet, nil, &rawAlerts, http.StatusOK, authHeader)
+	if len(rawAlerts.Items) != 3 {
+		t.Fatalf("expected 3 raw alert items, got %d", len(rawAlerts.Items))
+	}
+
+	var rawDetail shared.RawAlertDetail
+	doJSON(t, handler, "/api/v1/raw-alerts/"+rawAlerts.Items[0].ID+"/detail", http.MethodGet, nil, &rawDetail, http.StatusOK, authHeader)
+	if rawDetail.Item.ID == "" {
+		t.Fatal("expected raw alert detail item to be present")
+	}
+	if len(rawDetail.AggregateAlerts) == 0 {
+		t.Fatal("expected raw alert detail to include aggregate alerts")
+	}
+
+	var detail shared.AlertDetail
+	doJSON(t, handler, "/api/v1/alerts/"+alerts.Items[0].ID+"/detail", http.MethodGet, nil, &detail, http.StatusOK, authHeader)
+	if len(detail.SimilarSourceAlerts) == 0 {
+		t.Fatal("expected similar source alerts to be present")
+	}
+	if detail.DecisionBasis.AttackResultReason == "" {
+		t.Fatal("expected attack result reason to be present")
+	}
+	if len(detail.SameFlowTimeline) == 0 {
+		t.Fatal("expected same flow timeline to be present")
+	}
+}
+
 func TestProbeReconnectReusesExistingProbe(t *testing.T) {
 	t.Setenv("APP_EXPORT_DIR", t.TempDir())
 	handler, cleanup, err := NewHandler()
@@ -586,6 +839,150 @@ func TestProbeBecomesOfflineAfterHeartbeatTimeout(t *testing.T) {
 	doJSON(t, handler, "/api/v1/probes/"+probe.ID, http.MethodGet, nil, &detail, http.StatusOK, authHeader)
 	if detail.Probe.Status != "offline" {
 		t.Fatalf("expected probe detail to show offline, got %s", detail.Probe.Status)
+	}
+}
+
+func TestBatchUpdateAlerts(t *testing.T) {
+	t.Setenv("APP_EXPORT_DIR", t.TempDir())
+	handler, cleanup, err := NewHandler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	var login shared.LoginResponse
+	doJSON(t, handler, "/api/v1/auth/login", http.MethodPost, shared.LoginRequest{
+		TenantID: "demo-tenant",
+		Username: "admin",
+		Password: "admin123",
+	}, &login, http.StatusOK, "")
+	auth := "Bearer " + login.Token
+
+	var probe shared.Probe
+	doJSON(t, handler, "/api/v1/probes/register", http.MethodPost, shared.RegisterProbeRequest{
+		TenantID:    "tenant-batch-alert",
+		ProbeCode:   "probe-batch-alert",
+		Name:        "Batch Alert Probe",
+		Version:     "0.1.0",
+		RuleVersion: "rules-v1",
+	}, &probe, http.StatusCreated, "")
+
+	doJSON(t, handler, "/api/v1/events/ingest", http.MethodPost, shared.EventBatch{
+		TenantID: "tenant-batch-alert",
+		ProbeID:  probe.ID,
+		Events: []shared.SuricataEvent{
+			{
+				Timestamp: time.Now().UTC().Add(-time.Minute).Format(time.RFC3339),
+				EventType: "alert",
+				SrcIP:     "10.0.0.10",
+				DstIP:     "192.168.1.10",
+				DstPort:   80,
+				Proto:     "TCP",
+				Alert:     &shared.SuricataAlert{SignatureID: 3001, Signature: "Batch Alert One", Category: "web", Severity: 1},
+			},
+			{
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				EventType: "alert",
+				SrcIP:     "10.0.0.11",
+				DstIP:     "192.168.1.11",
+				DstPort:   443,
+				Proto:     "TCP",
+				Alert:     &shared.SuricataAlert{SignatureID: 3002, Signature: "Batch Alert Two", Category: "web", Severity: 2},
+			},
+		},
+	}, nil, http.StatusAccepted, "")
+
+	var alerts shared.AlertListResponse
+	doJSON(t, handler, "/api/v1/alerts?tenant_id=tenant-batch-alert&page=1&page_size=10", http.MethodGet, nil, &alerts, http.StatusOK, auth)
+	if len(alerts.Items) != 2 {
+		t.Fatalf("expected 2 alerts, got %d", len(alerts.Items))
+	}
+
+	var batch shared.BatchUpdateAlertStatusResponse
+	doJSON(t, handler, "/api/v1/alerts/batch", http.MethodPost, shared.BatchUpdateAlertStatusRequest{
+		TenantID: "tenant-batch-alert",
+		AlertIDs: []string{alerts.Items[0].ID, alerts.Items[1].ID},
+		Status:   "ack",
+		Assignee: "admin",
+	}, &batch, http.StatusOK, auth)
+	if batch.Updated != 2 {
+		t.Fatalf("expected 2 updated alerts, got %d", batch.Updated)
+	}
+
+	doJSON(t, handler, "/api/v1/alerts?tenant_id=tenant-batch-alert&page=1&page_size=10", http.MethodGet, nil, &alerts, http.StatusOK, auth)
+	for _, alert := range alerts.Items {
+		if alert.Status != "ack" {
+			t.Fatalf("expected alert to be ack, got %s", alert.Status)
+		}
+	}
+}
+
+func TestBootstrapSeedsDefaultRoleProfiles(t *testing.T) {
+	t.Setenv("APP_EXPORT_DIR", t.TempDir())
+	handler, cleanup, err := NewHandler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	var login shared.LoginResponse
+	doJSON(t, handler, "/api/v1/auth/login", http.MethodPost, shared.LoginRequest{
+		TenantID: "demo-tenant",
+		Username: "admin",
+		Password: "admin123",
+	}, &login, http.StatusOK, "")
+	auth := "Bearer " + login.Token
+
+	var roles []shared.Role
+	doJSON(t, handler, "/api/v1/roles?tenant_id=demo-tenant", http.MethodGet, nil, &roles, http.StatusOK, auth)
+	names := make(map[string]struct{}, len(roles))
+	for _, role := range roles {
+		names[role.Name] = struct{}{}
+	}
+	for _, expected := range []string{"system_admin", "security_operator", "security_analyst", "auditor"} {
+		if _, ok := names[expected]; !ok {
+			t.Fatalf("expected default role %s to be seeded", expected)
+		}
+	}
+
+	var templates []shared.RoleTemplate
+	doJSON(t, handler, "/api/v1/role-templates", http.MethodGet, nil, &templates, http.StatusOK, auth)
+	if len(templates) < 4 {
+		t.Fatalf("expected role templates to be exposed")
+	}
+}
+
+func TestCreateUserRejectsUnknownRole(t *testing.T) {
+	t.Setenv("APP_EXPORT_DIR", t.TempDir())
+	handler, cleanup, err := NewHandler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	var login shared.LoginResponse
+	doJSON(t, handler, "/api/v1/auth/login", http.MethodPost, shared.LoginRequest{
+		TenantID: "demo-tenant",
+		Username: "admin",
+		Password: "admin123",
+	}, &login, http.StatusOK, "")
+	auth := "Bearer " + login.Token
+
+	reqBody := shared.CreateUserRequest{
+		TenantID:    "demo-tenant",
+		Username:    "bad-role-user",
+		DisplayName: "Bad Role User",
+		Password:    "secret123",
+		Roles:       []string{"not_exists"},
+	}
+	reqBytes, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users", bytes.NewReader(reqBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", auth)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for unknown role, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -957,6 +1354,176 @@ func TestDataScopeEnforcement(t *testing.T) {
 		t.Fatalf("expected scoped user to see 1 alert, got %d", len(alerts.Items))
 	}
 	doJSON(t, handler, "/api/v1/alerts?tenant_id=demo-tenant", http.MethodGet, nil, nil, http.StatusForbidden, auth)
+}
+
+func TestOrganizationAndAssetScopeEnforcement(t *testing.T) {
+	handler, cleanup, err := NewHandler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	var admin shared.LoginResponse
+	doJSON(t, handler, "/api/v1/auth/login", http.MethodPost, shared.LoginRequest{
+		TenantID: "demo-tenant",
+		Username: "admin",
+		Password: "admin123",
+	}, &admin, http.StatusOK, "")
+	adminAuth := "Bearer " + admin.Token
+
+	var rootOrg shared.Organization
+	doJSON(t, handler, "/api/v1/organizations", http.MethodPost, shared.CreateOrganizationRequest{
+		TenantID: "tenant-org",
+		Name:     "总部",
+		Code:     "hq",
+	}, &rootOrg, http.StatusCreated, adminAuth)
+
+	var branchOrg shared.Organization
+	doJSON(t, handler, "/api/v1/organizations", http.MethodPost, shared.CreateOrganizationRequest{
+		TenantID: "tenant-org",
+		Name:     "分支",
+		Code:     "branch",
+	}, &branchOrg, http.StatusCreated, adminAuth)
+
+	var rootAsset shared.Asset
+	doJSON(t, handler, "/api/v1/assets", http.MethodPost, shared.CreateAssetRequest{
+		TenantID:        "tenant-org",
+		Name:            "HQ-Web",
+		IP:              "192.168.20.10",
+		OrgID:           rootOrg.ID,
+		AssetType:       "server",
+		ImportanceLevel: "high",
+		Owner:           "ops",
+		Tags:            []string{"hq"},
+	}, &rootAsset, http.StatusCreated, adminAuth)
+
+	var branchAsset shared.Asset
+	doJSON(t, handler, "/api/v1/assets", http.MethodPost, shared.CreateAssetRequest{
+		TenantID:        "tenant-org",
+		Name:            "Branch-Web",
+		IP:              "192.168.21.10",
+		OrgID:           branchOrg.ID,
+		AssetType:       "server",
+		ImportanceLevel: "medium",
+		Owner:           "ops",
+		Tags:            []string{"branch"},
+	}, &branchAsset, http.StatusCreated, adminAuth)
+
+	var probe shared.Probe
+	doJSON(t, handler, "/api/v1/probes/register", http.MethodPost, shared.RegisterProbeRequest{
+		TenantID:    "tenant-org",
+		ProbeCode:   "probe-org-01",
+		Name:        "Probe Org",
+		Version:     "0.1.0",
+		RuleVersion: "rules-v1",
+	}, &probe, http.StatusCreated, "")
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	doJSON(t, handler, "/api/v1/events/ingest", http.MethodPost, shared.EventBatch{
+		TenantID: "tenant-org",
+		ProbeID:  probe.ID,
+		Events: []shared.SuricataEvent{
+			{
+				Timestamp: now,
+				EventType: "alert",
+				SrcIP:     "10.20.0.1",
+				SrcPort:   44001,
+				DstIP:     rootAsset.IP,
+				DstPort:   80,
+				Proto:     "TCP",
+				AppProto:  "http",
+				FlowID:    "flow-org-1",
+				Alert:     &shared.SuricataAlert{SignatureID: 7001, Signature: "HQ Alert", Category: "Test", Severity: 1},
+			},
+			{
+				Timestamp: now,
+				EventType: "alert",
+				SrcIP:     "10.21.0.1",
+				SrcPort:   44002,
+				DstIP:     branchAsset.IP,
+				DstPort:   80,
+				Proto:     "TCP",
+				AppProto:  "http",
+				FlowID:    "flow-org-2",
+				Alert:     &shared.SuricataAlert{SignatureID: 7002, Signature: "Branch Alert", Category: "Test", Severity: 1},
+			},
+		},
+	}, nil, http.StatusAccepted, "")
+
+	var role shared.Role
+	doJSON(t, handler, "/api/v1/roles", http.MethodPost, shared.CreateRoleRequest{
+		TenantID:    "tenant-org",
+		Name:        "org-analyst",
+		Description: "Org scoped analyst",
+		Permissions: []string{"alert.read", "asset.read", "ticket.read"},
+	}, &role, http.StatusCreated, adminAuth)
+
+	var user shared.User
+	doJSON(t, handler, "/api/v1/users", http.MethodPost, shared.CreateUserRequest{
+		TenantID:       "tenant-org",
+		Username:       "org-user",
+		DisplayName:    "Org User",
+		Password:       "org123",
+		Roles:          []string{role.Name},
+		AllowedTenants: []string{"tenant-org"},
+		AllowedOrgIDs:  []string{rootOrg.ID},
+	}, &user, http.StatusCreated, adminAuth)
+
+	var login shared.LoginResponse
+	doJSON(t, handler, "/api/v1/auth/login", http.MethodPost, shared.LoginRequest{
+		TenantID: "tenant-org",
+		Username: "org-user",
+		Password: "org123",
+	}, &login, http.StatusOK, "")
+	auth := "Bearer " + login.Token
+
+	var assets []shared.Asset
+	doJSON(t, handler, "/api/v1/assets?tenant_id=tenant-org", http.MethodGet, nil, &assets, http.StatusOK, auth)
+	if len(assets) != 1 || assets[0].ID != rootAsset.ID {
+		t.Fatalf("expected only root asset, got %+v", assets)
+	}
+
+	var alerts shared.AlertListResponse
+	doJSON(t, handler, "/api/v1/alerts?tenant_id=tenant-org", http.MethodGet, nil, &alerts, http.StatusOK, auth)
+	if len(alerts.Items) != 1 || alerts.Items[0].Signature != "HQ Alert" {
+		t.Fatalf("expected only HQ alert, got %+v", alerts.Items)
+	}
+
+	var report shared.ReportSummary
+	doJSON(t, handler, "/api/v1/reports/summary?tenant_id=tenant-org", http.MethodGet, nil, &report, http.StatusOK, auth)
+	if len(report.TopSignatures) != 1 || report.TopSignatures[0].Date != "HQ Alert" {
+		t.Fatalf("expected only HQ signature in report, got %+v", report.TopSignatures)
+	}
+
+	var exportTask shared.ExportTask
+	doJSON(t, handler, "/api/v1/exports", http.MethodPost, shared.ExportTaskRequest{
+		TenantID:     "tenant-org",
+		ResourceType: "alerts",
+		Format:       "json",
+	}, &exportTask, http.StatusCreated, auth)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		doJSON(t, handler, "/api/v1/exports/"+exportTask.ID, http.MethodGet, nil, &exportTask, http.StatusOK, auth)
+		if exportTask.Status == "completed" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if exportTask.Status != "completed" {
+		t.Fatalf("expected completed scoped export task, got %+v", exportTask)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/exports/"+exportTask.ID+"/download", nil)
+	req.Header.Set("Authorization", auth)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+	if recorder.Result().StatusCode != http.StatusOK {
+		t.Fatalf("expected export download ok, got %d", recorder.Result().StatusCode)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "HQ Alert") || strings.Contains(body, "Branch Alert") {
+		t.Fatalf("expected scoped export content, got %s", body)
+	}
 }
 
 func TestTicketSLABreach(t *testing.T) {

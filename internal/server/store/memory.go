@@ -24,6 +24,7 @@ type MemoryStore struct {
 	rawEvents             map[string]shared.RawEvent
 	flows                 map[string]shared.Flow
 	assets                map[string]shared.Asset
+	organizations         map[string]shared.Organization
 	threatIntel           map[string]shared.ThreatIntel
 	suppressionRules      map[string]shared.SuppressionRule
 	riskPolicies          map[string]shared.RiskPolicy
@@ -56,6 +57,7 @@ func NewMemoryStore() *MemoryStore {
 		rawEvents:             make(map[string]shared.RawEvent),
 		flows:                 make(map[string]shared.Flow),
 		assets:                make(map[string]shared.Asset),
+		organizations:         make(map[string]shared.Organization),
 		threatIntel:           make(map[string]shared.ThreatIntel),
 		suppressionRules:      make(map[string]shared.SuppressionRule),
 		riskPolicies:          make(map[string]shared.RiskPolicy),
@@ -254,6 +256,16 @@ func (s *MemoryStore) ListUpgradePackages(_ context.Context, tenantID string) ([
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out, nil
+}
+
+func (s *MemoryStore) FindUpgradePackageByID(_ context.Context, tenantID, id string) (shared.UpgradePackage, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	item, ok := s.upgradePackages[id]
+	if !ok || item.TenantID != tenantID {
+		return shared.UpgradePackage{}, false, nil
+	}
+	return item, true, nil
 }
 
 func (s *MemoryStore) FindUpgradePackageByVersion(_ context.Context, tenantID, version string) (shared.UpgradePackage, bool, error) {
@@ -490,6 +502,34 @@ func (s *MemoryStore) FindAssetByIP(_ context.Context, tenantID, ip string) (sha
 		}
 	}
 	return shared.Asset{}, false, nil
+}
+
+func (s *MemoryStore) CreateOrganization(_ context.Context, org shared.Organization) (shared.Organization, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.organizations[org.ID] = org
+	return org, nil
+}
+
+func (s *MemoryStore) ListOrganizations(_ context.Context, tenantID string) ([]shared.Organization, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]shared.Organization, 0, len(s.organizations))
+	for _, item := range s.organizations {
+		if tenantID != "" && item.TenantID != tenantID {
+			continue
+		}
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out, nil
+}
+
+func (s *MemoryStore) GetOrganization(_ context.Context, id string) (shared.Organization, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	item, ok := s.organizations[id]
+	return item, ok, nil
 }
 
 func (s *MemoryStore) CreateThreatIntel(_ context.Context, intel shared.ThreatIntel) (shared.ThreatIntel, error) {

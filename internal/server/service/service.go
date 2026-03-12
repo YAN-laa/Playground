@@ -38,6 +38,7 @@ type Service struct {
 	pipeline            *pipeline.Processor
 	queries             *queryStats
 	exportDir           string
+	packageDir          string
 	exportTTL           time.Duration
 	probeOfflineAfter   time.Duration
 	authMode            string
@@ -63,9 +64,10 @@ func New(store store.Repository, engine search.Engine, indexer search.Indexer, s
 		store:               store,
 		search:              engine,
 		indexer:             indexer,
-		pipeline:            pipeline.New(),
+		pipeline:            pipeline.New(positiveDuration(envDuration("APP_ALERT_AGG_WINDOW", 30*time.Minute), 30*time.Minute)),
 		queries:             newQueryStats(200, slowQueryThreshold),
 		exportDir:           exportDir,
+		packageDir:          strings.TrimSpace(os.Getenv("APP_PACKAGE_DIR")),
 		exportTTL:           exportTTL,
 		probeOfflineAfter:   positiveDuration(envDuration("APP_PROBE_OFFLINE_AFTER", 45*time.Second), 45*time.Second),
 		authMode:            normalizeAuthMode(authConfig.Mode),
@@ -86,10 +88,14 @@ func New(store store.Repository, engine search.Engine, indexer search.Indexer, s
 	if svc.exportDir == "" {
 		svc.exportDir = filepath.Join(".", "exports")
 	}
+	if svc.packageDir == "" {
+		svc.packageDir = filepath.Join(".", "packages")
+	}
 	if svc.exportTTL <= 0 {
 		svc.exportTTL = 24 * time.Hour
 	}
 	_ = os.MkdirAll(svc.exportDir, 0o755)
+	_ = os.MkdirAll(svc.packageDir, 0o755)
 	svc.pipeline.SetResolvers(
 		func(tenantID, ip string) (*shared.Asset, error) {
 			asset, ok, err := svc.store.FindAssetByIP(context.Background(), tenantID, ip)
@@ -252,6 +258,8 @@ func (s *Service) Ingest(ctx context.Context, batch shared.EventBatch) ([]shared
 				base := projection.Alert
 				base.ID = s.nextID("alert")
 				base.Fingerprint = projection.Fingerprint
+				base.ProbeCount = len(base.ProbeIDs)
+				base.WindowMinutes = alertWindowMinutes(base.FirstSeenAt, base.LastSeenAt)
 				return base
 			}
 			updated := *existing
@@ -260,7 +268,18 @@ func (s *Service) Ingest(ctx context.Context, batch shared.EventBatch) ([]shared
 			if !contains(updated.ProbeIDs, batch.ProbeID) {
 				updated.ProbeIDs = append(updated.ProbeIDs, batch.ProbeID)
 			}
-			updated.RiskScore = projection.Alert.RiskScore
+			if projection.Alert.RiskScore > updated.RiskScore {
+				updated.RiskScore = projection.Alert.RiskScore
+			}
+			if projection.Alert.Severity != 0 && (updated.Severity == 0 || projection.Alert.Severity < updated.Severity) {
+				updated.Severity = projection.Alert.Severity
+			}
+			updated.AttackResult = mergeAttackResult(updated.AttackResult, projection.Alert.AttackResult)
+			if updated.Status == "closed" {
+				updated.Status = "new"
+			}
+			updated.ProbeCount = len(updated.ProbeIDs)
+			updated.WindowMinutes = alertWindowMinutes(updated.FirstSeenAt, updated.LastSeenAt)
 			return updated
 		})
 		if err != nil {
@@ -353,13 +372,28 @@ func (s *Service) GetAlertDetail(ctx context.Context, id string) (shared.AlertDe
 		}
 		activities = append(activities, items...)
 	}
+	similarSource, err := s.findSimilarAlerts(ctx, alert, "source")
+	if err != nil {
+		return shared.AlertDetail{}, false, err
+	}
+	similarTarget, err := s.findSimilarAlerts(ctx, alert, "target")
+	if err != nil {
+		return shared.AlertDetail{}, false, err
+	}
+	decisionBasis := buildAlertDecisionBasis(alert, events, contextEvents)
 	return shared.AlertDetail{
-		Alert:         alert,
-		Events:        events,
-		ContextEvents: contextEvents,
-		Flows:         flows,
-		Tickets:       tickets,
-		Activities:    activities,
+		Alert:               alert,
+		Events:              events,
+		ContextEvents:       contextEvents,
+		Flows:               flows,
+		Tickets:             tickets,
+		Activities:          activities,
+		DecisionBasis:       decisionBasis,
+		SameSourceTimeline:  buildRelatedAlertTimeline("source", alert, append([]shared.Alert{alert}, similarSource...), rawEvents),
+		SameTargetTimeline:  buildRelatedAlertTimeline("target", alert, append([]shared.Alert{alert}, similarTarget...), rawEvents),
+		SameFlowTimeline:    buildFlowTimeline(events, contextEvents),
+		SimilarSourceAlerts: similarSource,
+		SimilarTargetAlerts: similarTarget,
 	}, true, nil
 }
 
@@ -373,6 +407,178 @@ func (s *Service) ListAlerts(ctx context.Context, tenantID, status string, since
 
 func (s *Service) SearchAlerts(ctx context.Context, query shared.AlertQuery) (shared.AlertListResponse, error) {
 	return s.search.SearchAlerts(ctx, query)
+}
+
+func (s *Service) SearchAlertsForUser(ctx context.Context, user shared.User, query shared.AlertQuery) (shared.AlertListResponse, error) {
+	if len(user.AllowedAssetIDs) > 0 || len(user.AllowedOrgIDs) > 0 {
+		assetIDs, _, err := s.resolveScopeAssets(ctx, user, query.TenantID)
+		if err != nil {
+			return shared.AlertListResponse{}, err
+		}
+		query.AllowedAssetIDs = assetIDs
+	}
+	result, err := s.search.SearchAlerts(ctx, query)
+	if err != nil {
+		return shared.AlertListResponse{}, err
+	}
+	filtered := make([]shared.Alert, 0, len(result.Items))
+	for _, item := range result.Items {
+		if !s.CanAccessAlert(ctx, user, item) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	result.Items = filtered
+	result.Total = len(filtered)
+	return result, nil
+}
+
+func (s *Service) SearchRawAlertsForUser(ctx context.Context, user shared.User, query shared.RawAlertQuery) (shared.RawAlertListResponse, error) {
+	since := query.Since
+	if since.IsZero() {
+		since = time.Now().UTC().Add(-24 * time.Hour)
+	}
+	probeIDs := []string(nil)
+	if query.ProbeID != "" {
+		probeIDs = []string{query.ProbeID}
+	}
+	if len(user.AllowedProbeIDs) > 0 && !containsString(user.Permissions, "*") {
+		probeIDs = intersectStrings(probeIDs, user.AllowedProbeIDs)
+		if query.ProbeID == "" {
+			probeIDs = append([]string{}, user.AllowedProbeIDs...)
+		} else if len(probeIDs) == 0 {
+			page, pageSize := normalizePage(query.Page, query.PageSize)
+			return shared.RawAlertListResponse{Items: []shared.RawAlertItem{}, Total: 0, Page: page, PageSize: pageSize}, nil
+		}
+	}
+	rawEvents, err := s.store.ListRawEvents(ctx, query.TenantID, since, time.Time{}, probeIDs)
+	if err != nil {
+		return shared.RawAlertListResponse{}, err
+	}
+	items := make([]shared.RawAlertItem, 0)
+	for _, event := range rawEvents {
+		if event.Payload.EventType != "alert" || event.Payload.Alert == nil {
+			continue
+		}
+		item := rawAlertItemFromEvent(event)
+		if query.SrcIP != "" && item.SrcIP != query.SrcIP {
+			continue
+		}
+		if query.DstIP != "" && item.DstIP != query.DstIP {
+			continue
+		}
+		if query.Signature != "" && !strings.Contains(strings.ToLower(item.Signature), strings.ToLower(query.Signature)) {
+			continue
+		}
+		if query.Severity != 0 && item.Severity != query.Severity {
+			continue
+		}
+		if query.AttackResult != "" && item.AttackResult != query.AttackResult {
+			continue
+		}
+		if !s.canAccessRawAlertItem(ctx, user, item) {
+			continue
+		}
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].EventTime.After(items[j].EventTime)
+	})
+	page, pageSize := normalizePage(query.Page, query.PageSize)
+	total := len(items)
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	return shared.RawAlertListResponse{
+		Items:    items[start:end],
+		Total:    total,
+		Page:     page,
+		PageSize: pageSize,
+	}, nil
+}
+
+func (s *Service) GetRawAlertDetail(ctx context.Context, user shared.User, id string) (shared.RawAlertDetail, bool, error) {
+	rawEvents, err := s.store.ListRawEvents(ctx, "", time.Time{}, time.Time{}, nil)
+	if err != nil {
+		return shared.RawAlertDetail{}, false, err
+	}
+	var target shared.RawEvent
+	found := false
+	for _, event := range rawEvents {
+		if event.ID != id {
+			continue
+		}
+		target = event
+		found = true
+		break
+	}
+	if !found || target.Payload.EventType != "alert" || target.Payload.Alert == nil {
+		return shared.RawAlertDetail{}, false, nil
+	}
+	item := rawAlertItemFromEvent(target)
+	if !s.CanAccessTenant(user, item.TenantID) || !s.canAccessRawAlertItem(ctx, user, item) {
+		return shared.RawAlertDetail{}, false, nil
+	}
+	contextEvents := make([]shared.RawEvent, 0)
+	if target.Payload.FlowID != "" {
+		for _, event := range rawEvents {
+			if event.Payload.FlowID == target.Payload.FlowID && event.ID != target.ID {
+				contextEvents = append(contextEvents, event)
+			}
+		}
+	}
+	flows, err := s.store.ListFlowsByIDs(ctx, target.TenantID, []string{target.Payload.FlowID})
+	if err != nil {
+		return shared.RawAlertDetail{}, false, err
+	}
+	alerts, err := s.store.ListAlerts(ctx, shared.AlertQuery{
+		TenantID:  target.TenantID,
+		SrcIP:     target.Payload.SrcIP,
+		DstIP:     target.Payload.DstIP,
+		Signature: target.Payload.Alert.Signature,
+	})
+	if err != nil {
+		return shared.RawAlertDetail{}, false, err
+	}
+	filteredAlerts := make([]shared.Alert, 0, len(alerts))
+	for _, alert := range alerts {
+		if s.CanAccessAlert(ctx, user, alert) {
+			filteredAlerts = append(filteredAlerts, alert)
+		}
+	}
+	return shared.RawAlertDetail{
+		Item:            item,
+		Event:           target,
+		ContextEvents:   contextEvents,
+		Flows:           flows,
+		AggregateAlerts: filteredAlerts,
+	}, true, nil
+}
+
+func (s *Service) ListFlowsForUser(ctx context.Context, user shared.User, query shared.FlowQuery) ([]shared.Flow, error) {
+	if len(user.AllowedAssetIDs) > 0 || len(user.AllowedOrgIDs) > 0 {
+		_, ips, err := s.resolveScopeAssets(ctx, user, query.TenantID)
+		if err != nil {
+			return nil, err
+		}
+		query.AllowedIPs = ips
+	}
+	items, err := s.ListFlows(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]shared.Flow, 0, len(items))
+	for _, item := range items {
+		if s.CanAccessFlow(ctx, user, item) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered, nil
 }
 
 func (s *Service) GetAlert(ctx context.Context, id string) (shared.Alert, bool, error) {
@@ -403,6 +609,31 @@ func (s *Service) UpdateAlertStatus(ctx context.Context, id string, req shared.U
 		s.dispatchNotification(ctx, alert.TenantID, "alert.updated", "alert", alert.ID, alert)
 	}
 	return alert, ok, nil
+}
+
+func (s *Service) BatchUpdateAlertStatus(ctx context.Context, req shared.BatchUpdateAlertStatusRequest) (shared.BatchUpdateAlertStatusResponse, error) {
+	items := make([]shared.Alert, 0, len(req.AlertIDs))
+	for _, alertID := range uniqueStrings(req.AlertIDs) {
+		alert, ok, err := s.UpdateAlertStatus(ctx, alertID, shared.UpdateAlertStatusRequest{
+			Status:   req.Status,
+			Assignee: req.Assignee,
+		})
+		if err != nil {
+			return shared.BatchUpdateAlertStatusResponse{}, err
+		}
+		if !ok {
+			continue
+		}
+		if req.TenantID != "" && alert.TenantID != req.TenantID {
+			continue
+		}
+		items = append(items, alert)
+	}
+	return shared.BatchUpdateAlertStatusResponse{
+		Requested: len(uniqueStrings(req.AlertIDs)),
+		Updated:   len(items),
+		Items:     items,
+	}, nil
 }
 
 func (s *Service) CreateTicket(ctx context.Context, req shared.CreateTicketRequest) (shared.Ticket, bool, error) {
@@ -452,6 +683,35 @@ func (s *Service) CreateTicket(ctx context.Context, req shared.CreateTicketReque
 	return ticket, true, nil
 }
 
+func (s *Service) BatchCreateTickets(ctx context.Context, req shared.BatchCreateTicketRequest) (shared.BatchCreateTicketResponse, error) {
+	items := make([]shared.Ticket, 0, len(req.AlertIDs))
+	for _, alertID := range uniqueStrings(req.AlertIDs) {
+		titlePrefix := strings.TrimSpace(req.TitlePrefix)
+		if titlePrefix == "" {
+			titlePrefix = "批量处置工单"
+		}
+		ticket, ok, err := s.CreateTicket(ctx, shared.CreateTicketRequest{
+			TenantID:    req.TenantID,
+			AlertID:     alertID,
+			Title:       fmt.Sprintf("%s - %s", titlePrefix, alertID),
+			Description: req.Description,
+			Priority:    req.Priority,
+			Assignee:    req.Assignee,
+		})
+		if err != nil {
+			return shared.BatchCreateTicketResponse{}, err
+		}
+		if ok {
+			items = append(items, ticket)
+		}
+	}
+	return shared.BatchCreateTicketResponse{
+		Requested: len(uniqueStrings(req.AlertIDs)),
+		Created:   len(items),
+		Items:     items,
+	}, nil
+}
+
 func (s *Service) ListTickets(ctx context.Context, query shared.TicketQuery) (shared.TicketListResponse, error) {
 	items, err := s.store.ListTickets(ctx, query.TenantID)
 	if err != nil {
@@ -477,6 +737,22 @@ func (s *Service) ListTickets(ctx context.Context, query shared.TicketQuery) (sh
 	}, nil
 }
 
+func (s *Service) ListTicketsForUser(ctx context.Context, user shared.User, query shared.TicketQuery) (shared.TicketListResponse, error) {
+	result, err := s.ListTickets(ctx, query)
+	if err != nil {
+		return shared.TicketListResponse{}, err
+	}
+	filtered := make([]shared.Ticket, 0, len(result.Items))
+	for _, item := range result.Items {
+		if s.CanAccessTicket(ctx, user, item) {
+			filtered = append(filtered, item)
+		}
+	}
+	result.Items = filtered
+	result.Total = len(filtered)
+	return result, nil
+}
+
 func (s *Service) GetTicketDetail(ctx context.Context, id string) (shared.TicketDetail, bool, error) {
 	ticket, ok, err := s.store.GetTicket(ctx, id)
 	if err != nil || !ok {
@@ -497,6 +773,20 @@ func (s *Service) GetTicketDetail(ctx context.Context, id string) (shared.Ticket
 		return shared.TicketDetail{}, false, err
 	}
 	return shared.TicketDetail{Ticket: ticket, Alert: alert, Activities: activities}, true, nil
+}
+
+func (s *Service) CanAccessTicket(ctx context.Context, user shared.User, ticket shared.Ticket) bool {
+	if contains(user.Permissions, "*") {
+		return true
+	}
+	if ticket.AlertID == "" {
+		return true
+	}
+	alert, ok, err := s.store.GetAlert(ctx, ticket.AlertID)
+	if err != nil || !ok {
+		return false
+	}
+	return s.CanAccessAlert(ctx, user, alert)
 }
 
 func (s *Service) UpdateTicketStatus(ctx context.Context, id string, req shared.UpdateTicketStatusRequest) (shared.Ticket, bool, error) {
@@ -523,7 +813,44 @@ func (s *Service) UpdateTicketStatus(ctx context.Context, id string, req shared.
 	return ticket, true, nil
 }
 
+func (s *Service) BatchUpdateTicketStatus(ctx context.Context, req shared.BatchUpdateTicketStatusRequest) (shared.BatchUpdateTicketStatusResponse, error) {
+	items := make([]shared.Ticket, 0, len(req.TicketIDs))
+	for _, ticketID := range req.TicketIDs {
+		ticket, ok, err := s.UpdateTicketStatus(ctx, ticketID, shared.UpdateTicketStatusRequest{
+			Status:   req.Status,
+			Assignee: req.Assignee,
+		})
+		if err != nil {
+			return shared.BatchUpdateTicketStatusResponse{}, err
+		}
+		if ok {
+			items = append(items, ticket)
+		}
+	}
+	return shared.BatchUpdateTicketStatusResponse{
+		Requested: len(req.TicketIDs),
+		Updated:   len(items),
+		Items:     items,
+	}, nil
+}
+
 func (s *Service) CreateUser(ctx context.Context, req shared.CreateUserRequest, operatorID string) (shared.User, error) {
+	if len(req.Roles) == 0 {
+		return shared.User{}, fmt.Errorf("at least one role is required")
+	}
+	roles, err := s.store.ListRoles(ctx, req.TenantID)
+	if err != nil {
+		return shared.User{}, err
+	}
+	roleSet := make(map[string]struct{}, len(roles))
+	for _, role := range roles {
+		roleSet[role.Name] = struct{}{}
+	}
+	for _, role := range req.Roles {
+		if _, ok := roleSet[role]; !ok {
+			return shared.User{}, fmt.Errorf("role %s not found", role)
+		}
+	}
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		return shared.User{}, err
@@ -538,6 +865,8 @@ func (s *Service) CreateUser(ctx context.Context, req shared.CreateUserRequest, 
 		Roles:           req.Roles,
 		AllowedTenants:  normalizeScopeTenants(req.TenantID, req.AllowedTenants),
 		AllowedProbeIDs: uniqueStrings(req.AllowedProbeIDs),
+		AllowedAssetIDs: uniqueStrings(req.AllowedAssetIDs),
+		AllowedOrgIDs:   uniqueStrings(req.AllowedOrgIDs),
 		CreatedAt:       time.Now().UTC(),
 	}
 	created, err := s.store.CreateUser(ctx, user)
@@ -577,6 +906,38 @@ func (s *Service) CreateRole(ctx context.Context, req shared.CreateRoleRequest, 
 
 func (s *Service) ListRoles(ctx context.Context, tenantID string) ([]shared.Role, error) {
 	return s.store.ListRoles(ctx, tenantID)
+}
+
+func (s *Service) ListRoleTemplates(_ context.Context) []shared.RoleTemplate {
+	return roleTemplates()
+}
+
+func (s *Service) DashboardWorkbench(ctx context.Context, user shared.User) (shared.DashboardWorkbench, error) {
+	stats, err := s.DashboardStatsForUser(ctx, user, user.TenantID)
+	if err != nil {
+		return shared.DashboardWorkbench{}, err
+	}
+	template := shared.RoleTemplate{
+		Name:        "custom",
+		Label:       "未分类角色",
+		Description: "未命中预置角色模板，默认展示全部模块。",
+	}
+	for _, role := range user.Roles {
+		for _, item := range roleTemplates() {
+			if item.Name == role {
+				template = item
+				break
+			}
+		}
+		if template.Name != "custom" {
+			break
+		}
+	}
+	return shared.DashboardWorkbench{
+		RoleTemplate: template,
+		Stats:        stats,
+		Recommended:  recommendedWorkbenchItems(template.Name),
+	}, nil
 }
 
 func (s *Service) Login(ctx context.Context, req shared.LoginRequest) (shared.LoginResponse, bool, error) {
@@ -807,8 +1168,58 @@ func (s *Service) CreateUpgradePackage(ctx context.Context, req shared.CreateUpg
 	return created, nil
 }
 
+func (s *Service) UploadUpgradePackage(ctx context.Context, tenantID, version, notes, fileName string, enabled bool, content []byte, operatorID string) (shared.UpgradePackage, error) {
+	if strings.TrimSpace(version) == "" {
+		return shared.UpgradePackage{}, fmt.Errorf("version is required")
+	}
+	if len(content) == 0 {
+		return shared.UpgradePackage{}, fmt.Errorf("package content is empty")
+	}
+	cleanName := filepath.Base(strings.TrimSpace(fileName))
+	if cleanName == "." || cleanName == "" {
+		cleanName = fmt.Sprintf("%s.bin", version)
+	}
+	sum := sha256.Sum256(content)
+	pkgID := s.nextID("pkg")
+	storageName := fmt.Sprintf("%s-%s", pkgID, cleanName)
+	storagePath := filepath.Join(s.packageDir, storageName)
+	if err := os.WriteFile(storagePath, content, 0o644); err != nil {
+		return shared.UpgradePackage{}, err
+	}
+	pkg := shared.UpgradePackage{
+		ID:         pkgID,
+		TenantID:   tenantID,
+		Version:    version,
+		PackageURL: fmt.Sprintf("/api/v1/upgrade-packages/%s/download", pkgID),
+		FileName:   cleanName,
+		FileSize:   int64(len(content)),
+		Checksum:   fmt.Sprintf("sha256:%x", sum),
+		Notes:      notes,
+		Enabled:    enabled,
+		CreatedAt:  time.Now().UTC(),
+	}
+	created, err := s.store.CreateUpgradePackage(ctx, pkg)
+	if err != nil {
+		_ = os.Remove(storagePath)
+		return shared.UpgradePackage{}, err
+	}
+	if err := s.addAuditLog(ctx, tenantID, operatorID, "upload_upgrade_package", "upgrade_package", created.ID, "success"); err != nil {
+		return shared.UpgradePackage{}, err
+	}
+	_ = s.addActivity(ctx, tenantID, "upgrade_package", created.ID, "upload_upgrade_package", operatorID, created.Version)
+	return created, nil
+}
+
 func (s *Service) ListUpgradePackages(ctx context.Context, tenantID string) ([]shared.UpgradePackage, error) {
 	return s.store.ListUpgradePackages(ctx, tenantID)
+}
+
+func (s *Service) GetUpgradePackage(ctx context.Context, tenantID, id string) (shared.UpgradePackage, bool, error) {
+	return s.store.FindUpgradePackageByID(ctx, tenantID, id)
+}
+
+func (s *Service) UpgradePackagePath(pkg shared.UpgradePackage) string {
+	return filepath.Join(s.packageDir, fmt.Sprintf("%s-%s", pkg.ID, filepath.Base(pkg.FileName)))
 }
 
 func (s *Service) ListProbeMetrics(ctx context.Context, query shared.ProbeMetricQuery) ([]shared.ProbeMetric, error) {
@@ -816,11 +1227,24 @@ func (s *Service) ListProbeMetrics(ctx context.Context, query shared.ProbeMetric
 }
 
 func (s *Service) CreateAsset(ctx context.Context, req shared.CreateAssetRequest, operatorID string) (shared.Asset, error) {
+	var orgName string
+	if req.OrgID != "" {
+		org, ok, err := s.store.GetOrganization(ctx, req.OrgID)
+		if err != nil {
+			return shared.Asset{}, err
+		}
+		if !ok || org.TenantID != req.TenantID {
+			return shared.Asset{}, fmt.Errorf("organization not found")
+		}
+		orgName = org.Name
+	}
 	asset := shared.Asset{
 		ID:              s.nextID("asset"),
 		TenantID:        req.TenantID,
 		Name:            req.Name,
 		IP:              req.IP,
+		OrgID:           strings.TrimSpace(req.OrgID),
+		OrgName:         orgName,
 		AssetType:       req.AssetType,
 		ImportanceLevel: req.ImportanceLevel,
 		Owner:           req.Owner,
@@ -838,6 +1262,91 @@ func (s *Service) CreateAsset(ctx context.Context, req shared.CreateAssetRequest
 
 func (s *Service) ListAssets(ctx context.Context, tenantID string) ([]shared.Asset, error) {
 	return s.store.ListAssets(ctx, tenantID)
+}
+
+func (s *Service) ListAssetsForUser(ctx context.Context, user shared.User, tenantID string) ([]shared.Asset, error) {
+	items, err := s.store.ListAssets(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]shared.Asset, 0, len(items))
+	for _, item := range items {
+		if s.CanAccessAsset(user, item) {
+			out = append(out, item)
+		}
+	}
+	return out, nil
+}
+
+func (s *Service) CreateOrganization(ctx context.Context, req shared.CreateOrganizationRequest, operatorID string) (shared.Organization, error) {
+	level := 1
+	path := []string{}
+	if req.ParentID != "" {
+		parent, ok, err := s.store.GetOrganization(ctx, req.ParentID)
+		if err != nil {
+			return shared.Organization{}, err
+		}
+		if !ok || parent.TenantID != req.TenantID {
+			return shared.Organization{}, fmt.Errorf("parent organization not found")
+		}
+		level = parent.Level + 1
+		path = append(path, parent.Path...)
+		path = append(path, parent.ID)
+	}
+	item := shared.Organization{
+		ID:        s.nextID("org"),
+		TenantID:  req.TenantID,
+		Name:      strings.TrimSpace(req.Name),
+		Code:      strings.TrimSpace(req.Code),
+		ParentID:  strings.TrimSpace(req.ParentID),
+		Level:     level,
+		Path:      path,
+		CreatedAt: time.Now().UTC(),
+	}
+	created, err := s.store.CreateOrganization(ctx, item)
+	if err != nil {
+		return shared.Organization{}, err
+	}
+	_ = s.addAuditLog(ctx, req.TenantID, operatorID, "create_organization", "organization", created.ID, "success")
+	_ = s.addActivity(ctx, req.TenantID, "organization", created.ID, "create_organization", operatorID, created.Name)
+	return created, nil
+}
+
+func (s *Service) ListOrganizations(ctx context.Context, tenantID string) ([]shared.Organization, error) {
+	return s.store.ListOrganizations(ctx, tenantID)
+}
+
+func (s *Service) ListOrganizationsForUser(ctx context.Context, user shared.User, tenantID string) ([]shared.Organization, error) {
+	items, err := s.store.ListOrganizations(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]shared.Organization, 0, len(items))
+	for _, item := range items {
+		if s.CanAccessOrganization(user, item) {
+			out = append(out, item)
+		}
+	}
+	return out, nil
+}
+
+func (s *Service) resolveScopeAssets(ctx context.Context, user shared.User, tenantID string) ([]string, []string, error) {
+	items, err := s.store.ListAssets(ctx, tenantID)
+	if err != nil {
+		return nil, nil, err
+	}
+	assetIDs := make([]string, 0)
+	ips := make([]string, 0)
+	for _, item := range items {
+		if !s.CanAccessAsset(user, item) {
+			continue
+		}
+		assetIDs = append(assetIDs, item.ID)
+		if item.IP != "" {
+			ips = append(ips, item.IP)
+		}
+	}
+	return uniqueStrings(assetIDs), uniqueStrings(ips), nil
 }
 
 func (s *Service) CreateThreatIntel(ctx context.Context, req shared.CreateThreatIntelRequest, operatorID string) (shared.ThreatIntel, error) {
@@ -1300,6 +1809,53 @@ func (s *Service) DashboardStats(ctx context.Context, tenantID string) (shared.D
 	return stats, nil
 }
 
+func (s *Service) DashboardStatsForUser(ctx context.Context, user shared.User, tenantID string) (shared.DashboardStats, error) {
+	stats, err := s.DashboardStats(ctx, tenantID)
+	if err != nil {
+		return shared.DashboardStats{}, err
+	}
+	if contains(user.Permissions, "*") && len(user.AllowedAssetIDs) == 0 && len(user.AllowedOrgIDs) == 0 {
+		return stats, nil
+	}
+	alerts, err := s.store.ListAlerts(ctx, shared.AlertQuery{TenantID: tenantID})
+	if err != nil {
+		return shared.DashboardStats{}, err
+	}
+	tickets, err := s.store.ListTickets(ctx, tenantID)
+	if err != nil {
+		return shared.DashboardStats{}, err
+	}
+	flows, err := s.store.ListFlows(ctx, shared.FlowQuery{TenantID: tenantID})
+	if err != nil {
+		return shared.DashboardStats{}, err
+	}
+	stats.AlertsOpen = 0
+	stats.AlertsClosed = 0
+	stats.TicketsOpen = 0
+	stats.FlowsObserved = 0
+	for _, alert := range alerts {
+		if !s.CanAccessAlert(ctx, user, alert) {
+			continue
+		}
+		if alert.Status == "closed" {
+			stats.AlertsClosed++
+		} else {
+			stats.AlertsOpen++
+		}
+	}
+	for _, ticket := range tickets {
+		if s.CanAccessTicket(ctx, user, ticket) && ticket.Status != "closed" {
+			stats.TicketsOpen++
+		}
+	}
+	for _, flow := range flows {
+		if s.CanAccessFlow(ctx, user, flow) {
+			stats.FlowsObserved++
+		}
+	}
+	return stats, nil
+}
+
 func (s *Service) runtimeProbeStatus(probe shared.Probe, now time.Time) shared.Probe {
 	if strings.EqualFold(probe.Status, "offline") {
 		return probe
@@ -1345,6 +1901,52 @@ func (s *Service) ReportSummary(ctx context.Context, tenantID string, since time
 		ticketTrendMap[day]++
 	}
 
+	return shared.ReportSummary{
+		AlertTrend:    topTrend(alertTrendMap, 7),
+		TicketTrend:   topTrend(ticketTrendMap, 7),
+		TopSignatures: topTrend(signatureMap, 5),
+		TopSourceIPs:  topTrend(sourceMap, 5),
+	}, nil
+}
+
+func (s *Service) ReportSummaryForUser(ctx context.Context, user shared.User, tenantID string, since time.Time) (shared.ReportSummary, error) {
+	if contains(user.Permissions, "*") && len(user.AllowedAssetIDs) == 0 && len(user.AllowedOrgIDs) == 0 {
+		return s.ReportSummary(ctx, tenantID, since)
+	}
+	alerts, err := s.store.ListAlerts(ctx, shared.AlertQuery{TenantID: tenantID})
+	if err != nil {
+		return shared.ReportSummary{}, err
+	}
+	tickets, err := s.store.ListTickets(ctx, tenantID)
+	if err != nil {
+		return shared.ReportSummary{}, err
+	}
+	alertTrendMap := map[string]int{}
+	ticketTrendMap := map[string]int{}
+	signatureMap := map[string]int{}
+	sourceMap := map[string]int{}
+	for _, alert := range alerts {
+		if !s.CanAccessAlert(ctx, user, alert) {
+			continue
+		}
+		if !since.IsZero() && alert.LastSeenAt.Before(since) {
+			continue
+		}
+		day := alert.LastSeenAt.Format("2006-01-02")
+		alertTrendMap[day]++
+		signatureMap[alert.Signature] += alert.EventCount
+		sourceMap[alert.SrcIP] += alert.EventCount
+	}
+	for _, ticket := range tickets {
+		if !s.CanAccessTicket(ctx, user, ticket) {
+			continue
+		}
+		if !since.IsZero() && ticket.CreatedAt.Before(since) {
+			continue
+		}
+		day := ticket.CreatedAt.Format("2006-01-02")
+		ticketTrendMap[day]++
+	}
 	return shared.ReportSummary{
 		AlertTrend:    topTrend(alertTrendMap, 7),
 		TicketTrend:   topTrend(ticketTrendMap, 7),
@@ -1410,6 +2012,99 @@ func (s *Service) CanAccessTenant(user shared.User, tenantID string) bool {
 	}
 	for _, allowed := range user.AllowedTenants {
 		if allowed == tenantID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) CanAccessOrganization(user shared.User, org shared.Organization) bool {
+	if contains(user.Permissions, "*") || len(user.AllowedOrgIDs) == 0 {
+		return true
+	}
+	if contains(user.AllowedOrgIDs, org.ID) {
+		return true
+	}
+	for _, parentID := range org.Path {
+		if contains(user.AllowedOrgIDs, parentID) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) CanAccessAsset(user shared.User, asset shared.Asset) bool {
+	if contains(user.Permissions, "*") {
+		return true
+	}
+	if len(user.AllowedAssetIDs) == 0 && len(user.AllowedOrgIDs) == 0 {
+		return true
+	}
+	if len(user.AllowedAssetIDs) > 0 && contains(user.AllowedAssetIDs, asset.ID) {
+		return true
+	}
+	if len(user.AllowedOrgIDs) > 0 && asset.OrgID != "" && contains(user.AllowedOrgIDs, asset.OrgID) {
+		return true
+	}
+	return false
+}
+
+func (s *Service) CanAccessAlert(ctx context.Context, user shared.User, alert shared.Alert) bool {
+	if contains(user.Permissions, "*") {
+		return true
+	}
+	if len(user.AllowedProbeIDs) > 0 {
+		probeOK := false
+		for _, id := range alert.ProbeIDs {
+			if contains(user.AllowedProbeIDs, id) {
+				probeOK = true
+				break
+			}
+		}
+		if !probeOK {
+			return false
+		}
+	}
+	if len(user.AllowedAssetIDs) == 0 && len(user.AllowedOrgIDs) == 0 {
+		return true
+	}
+	if alert.SourceAssetID != "" && contains(user.AllowedAssetIDs, alert.SourceAssetID) {
+		return true
+	}
+	if alert.TargetAssetID != "" && contains(user.AllowedAssetIDs, alert.TargetAssetID) {
+		return true
+	}
+	if len(user.AllowedOrgIDs) > 0 {
+		assets, err := s.store.ListAssets(ctx, alert.TenantID)
+		if err == nil {
+			for _, asset := range assets {
+				if asset.ID == alert.SourceAssetID || asset.ID == alert.TargetAssetID {
+					if s.CanAccessAsset(user, asset) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (s *Service) CanAccessFlow(ctx context.Context, user shared.User, flow shared.Flow) bool {
+	if contains(user.Permissions, "*") {
+		return true
+	}
+	if len(user.AllowedAssetIDs) == 0 && len(user.AllowedOrgIDs) == 0 {
+		return true
+	}
+	assets, err := s.store.ListAssets(ctx, flow.TenantID)
+	if err != nil {
+		return false
+	}
+	for _, asset := range assets {
+		if asset.IP != flow.SrcIP && asset.IP != flow.DstIP {
+			continue
+		}
+		if s.CanAccessAsset(user, asset) {
 			return true
 		}
 	}
@@ -1663,10 +2358,28 @@ func (s *Service) ListExportTasks(ctx context.Context, tenantID string) ([]share
 	return s.store.ListExportTasks(ctx, tenantID)
 }
 
+func (s *Service) ListExportTasksForUser(ctx context.Context, user shared.User, tenantID string) ([]shared.ExportTask, error) {
+	items, err := s.store.ListExportTasks(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if contains(user.Permissions, "*") {
+		return items, nil
+	}
+	out := make([]shared.ExportTask, 0, len(items))
+	for _, item := range items {
+		if item.UserID == user.ID {
+			out = append(out, item)
+		}
+	}
+	return out, nil
+}
+
 func (s *Service) runExportTask(task shared.ExportTask, req shared.ExportTaskRequest) {
 	ctx := context.Background()
 	task.Status = "running"
 	_, _ = s.store.UpdateExportTask(ctx, task)
+	user, _, _ := s.store.GetUser(ctx, task.UserID)
 
 	filePath := filepath.Join(s.exportDir, task.ID+"."+task.Format)
 	var payload any
@@ -1676,7 +2389,7 @@ func (s *Service) runExportTask(task shared.ExportTask, req shared.ExportTaskReq
 		query.TenantID = task.TenantID
 		query.Page = 1
 		query.PageSize = 1000
-		result, err := s.search.SearchAlerts(ctx, query)
+		result, err := s.SearchAlertsForUser(ctx, user, query)
 		if err != nil {
 			s.failExportTask(ctx, task, err)
 			return
@@ -1690,7 +2403,13 @@ func (s *Service) runExportTask(task shared.ExportTask, req shared.ExportTaskReq
 			s.failExportTask(ctx, task, err)
 			return
 		}
-		payload = items
+		filtered := make([]shared.Flow, 0, len(items))
+		for _, item := range items {
+			if s.CanAccessFlow(ctx, user, item) {
+				filtered = append(filtered, item)
+			}
+		}
+		payload = filtered
 	default:
 		s.failExportTask(ctx, task, fmt.Errorf("unsupported export resource type: %s", task.ResourceType))
 		return
@@ -1795,7 +2514,7 @@ func encodeExportCSV(resourceType string, payload any) ([]byte, error) {
 	switch resourceType {
 	case "alerts":
 		items, _ := payload.([]shared.Alert)
-		if err := writer.Write([]string{"id", "tenant_id", "signature", "src_ip", "dst_ip", "dst_port", "severity", "risk_score", "status", "assignee", "first_seen_at", "last_seen_at", "event_count"}); err != nil {
+		if err := writer.Write([]string{"id", "tenant_id", "signature", "src_ip", "dst_ip", "dst_port", "severity", "risk_score", "attack_result", "status", "assignee", "first_seen_at", "last_seen_at", "event_count"}); err != nil {
 			return nil, err
 		}
 		for _, item := range items {
@@ -1808,6 +2527,7 @@ func encodeExportCSV(resourceType string, payload any) ([]byte, error) {
 				fmt.Sprintf("%d", item.DstPort),
 				fmt.Sprintf("%d", item.Severity),
 				fmt.Sprintf("%d", item.RiskScore),
+				item.AttackResult,
 				item.Status,
 				item.Assignee,
 				item.FirstSeenAt.Format(time.RFC3339),
@@ -2173,19 +2893,26 @@ func summarizeNotificationPayload(payload any) string {
 
 func (s *Service) bootstrap() {
 	ctx := context.Background()
-	adminRole, _, err := s.store.FindUser(ctx, "demo-tenant", "admin")
-	if err == nil && adminRole.ID != "" {
+	now := time.Now().UTC()
+	existingRoles, err := s.store.ListRoles(ctx, "demo-tenant")
+	if err != nil {
 		return
 	}
-	role, err := s.store.CreateRole(ctx, shared.Role{
-		ID:          s.nextID("role"),
-		TenantID:    "demo-tenant",
-		Name:        "admin",
-		Description: "Default administrator role",
-		Permissions: []string{"*"},
-		CreatedAt:   time.Now().UTC(),
-	})
-	if err != nil {
+	existingRoleNames := make(map[string]struct{}, len(existingRoles))
+	for _, role := range existingRoles {
+		existingRoleNames[role.Name] = struct{}{}
+	}
+	templates := bootstrapRoles(now, s.nextID)
+	for _, role := range templates {
+		if _, ok := existingRoleNames[role.Name]; ok {
+			continue
+		}
+		if _, err := s.store.CreateRole(ctx, role); err != nil {
+			return
+		}
+	}
+	adminUser, _, err := s.store.FindUser(ctx, "demo-tenant", "admin")
+	if err == nil && adminUser.ID != "" {
 		return
 	}
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte("admin123"), bcrypt.DefaultCost)
@@ -2199,9 +2926,81 @@ func (s *Service) bootstrap() {
 		DisplayName: "System Admin",
 		Password:    string(passwordHash),
 		Status:      "active",
-		Roles:       []string{role.Name},
-		CreatedAt:   time.Now().UTC(),
+		Roles:       []string{"admin", "system_admin"},
+		CreatedAt:   now,
 	})
+}
+
+func roleTemplates() []shared.RoleTemplate {
+	return []shared.RoleTemplate{
+		{
+			Name:        "system_admin",
+			Label:       "系统管理员",
+			Description: "负责平台运行、探针、配置、用户权限、审计和系统治理。",
+			Permissions: []string{"probe.read", "probe.write", "user.read", "user.write", "role.read", "role.write", "notify.read", "notify.write", "policy.read", "policy.write", "audit.read", "alert.read", "ticket.read", "asset.read", "intel.read"},
+			Modules:     []string{"overview", "probes", "policies", "notifications", "users", "roles", "audit", "query-stats", "reports"},
+		},
+		{
+			Name:        "security_operator",
+			Label:       "安全运营人员",
+			Description: "负责告警确认、关闭、转工单和处置闭环。",
+			Permissions: []string{"alert.read", "alert.write", "ticket.read", "ticket.write", "notify.read"},
+			Modules:     []string{"overview", "alerts", "tickets", "reports", "exports", "notifications"},
+		},
+		{
+			Name:        "security_analyst",
+			Label:       "安全分析人员",
+			Description: "负责告警研判、流量分析、资产和情报联动。",
+			Permissions: []string{"alert.read", "ticket.read", "asset.read", "intel.read"},
+			Modules:     []string{"overview", "alerts", "flows", "assets", "intel", "reports", "exports"},
+		},
+		{
+			Name:        "auditor",
+			Label:       "审计人员",
+			Description: "负责审计、查询统计和运营监督，不直接参与处置。",
+			Permissions: []string{"audit.read"},
+			Modules:     []string{"overview", "reports", "audit", "query-stats"},
+		},
+	}
+}
+
+func recommendedWorkbenchItems(role string) []string {
+	switch role {
+	case "system_admin":
+		return []string{"优先检查探针在线率、版本和下发失败记录。", "查看审计日志和查询统计，确认平台运行稳定。", "变更配置、规则和升级前先核对租户与范围。"}
+	case "security_operator":
+		return []string{"优先处理高风险、未关闭和重复命中的告警。", "将需要跟进的告警及时转工单并确认责任人。", "重点关注超时工单和批量处置结果。"}
+	case "security_analyst":
+		return []string{"先看高风险告警的协议上下文、资产命中和情报标签。", "结合流量检索回溯同流量、同目标的上下文事件。", "研判后补充情报或资产标签，方便运营闭环。"}
+	case "auditor":
+		return []string{"查看审计日志、查询统计和导出记录。", "关注异常查询、批量操作和配置变更。", "按报表结果监督告警闭环和工单时效。"}
+	default:
+		return []string{"根据权限选择需要的模块。"}
+	}
+}
+
+func bootstrapRoles(now time.Time, nextID func(string) string) []shared.Role {
+	out := []shared.Role{
+		{
+			ID:          nextID("role"),
+			TenantID:    "demo-tenant",
+			Name:        "admin",
+			Description: "默认超级管理员",
+			Permissions: []string{"*"},
+			CreatedAt:   now,
+		},
+	}
+	for _, template := range roleTemplates() {
+		out = append(out, shared.Role{
+			ID:          nextID("role"),
+			TenantID:    "demo-tenant",
+			Name:        template.Name,
+			Description: template.Description,
+			Permissions: template.Permissions,
+			CreatedAt:   now,
+		})
+	}
+	return out
 }
 
 func pipelineParseTime(value string) time.Time { return pipelineParse(value) }
@@ -2224,6 +3023,497 @@ func contains(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func intersectStrings(left, right []string) []string {
+	if len(left) == 0 {
+		return []string{}
+	}
+	allowed := make(map[string]struct{}, len(right))
+	for _, item := range right {
+		allowed[item] = struct{}{}
+	}
+	out := make([]string, 0, len(left))
+	for _, item := range left {
+		if _, ok := allowed[item]; ok {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func alertWindowMinutes(firstSeenAt, lastSeenAt time.Time) int {
+	if firstSeenAt.IsZero() || lastSeenAt.IsZero() || lastSeenAt.Before(firstSeenAt) {
+		return 0
+	}
+	duration := lastSeenAt.Sub(firstSeenAt)
+	minutes := int(duration.Minutes())
+	if duration > 0 && minutes == 0 {
+		return 1
+	}
+	if minutes < 0 {
+		return 0
+	}
+	return minutes
+}
+
+func (s *Service) findSimilarAlerts(ctx context.Context, alert shared.Alert, mode string) ([]shared.Alert, error) {
+	items, err := s.store.ListAlerts(ctx, shared.AlertQuery{TenantID: alert.TenantID})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]shared.Alert, 0, 20)
+	for _, item := range items {
+		if item.ID == alert.ID {
+			continue
+		}
+		switch mode {
+		case "source":
+			if item.SrcIP != alert.SrcIP {
+				continue
+			}
+		case "target":
+			if item.DstIP != alert.DstIP {
+				continue
+			}
+		default:
+			continue
+		}
+		out = append(out, item)
+		if len(out) == 20 {
+			break
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].LastSeenAt.Before(out[j].LastSeenAt)
+	})
+	return out, nil
+}
+
+func buildAlertDecisionBasis(alert shared.Alert, events []shared.RawEvent, contextEvents []shared.RawEvent) shared.AlertDecisionBasis {
+	reason, snippet := inferAttackResultReason(events, contextEvents, alert.AttackResult)
+	aggregation := []string{
+		fmt.Sprintf("按源地址 %s、目的地址 %s、端口 %d、协议 %s、规则 %d 聚合", alert.SrcIP, alert.DstIP, alert.DstPort, alert.Proto, alert.SignatureID),
+		fmt.Sprintf("当前聚合窗口 %d 分钟，累计命中 %d 次", maxInt(alert.WindowMinutes, 1), alert.EventCount),
+		fmt.Sprintf("跨 %d 个探针合并", maxInt(alert.ProbeCount, len(alert.ProbeIDs))),
+	}
+	risk := []string{
+		fmt.Sprintf("基础严重级别为 %s", formatSeverityText(alert.Severity)),
+	}
+	if len(alert.ThreatIntelHits) > 0 {
+		risk = append(risk, fmt.Sprintf("命中情报 %d 项", len(alert.ThreatIntelHits)))
+	}
+	if alert.TargetAssetName != "" {
+		risk = append(risk, fmt.Sprintf("目标资产 %s 纳入风险加权", alert.TargetAssetName))
+	}
+	risk = append(risk, fmt.Sprintf("当前风险分 %d", alert.RiskScore))
+	return shared.AlertDecisionBasis{
+		AttackResult:       alert.AttackResult,
+		AttackResultReason: reason,
+		ResponseSnippet:    snippet,
+		AggregationReason:  aggregation,
+		RiskReason:         risk,
+	}
+}
+
+func inferAttackResultReason(events []shared.RawEvent, contextEvents []shared.RawEvent, attackResult string) (string, string) {
+	all := append([]shared.RawEvent{}, contextEvents...)
+	all = append(all, events...)
+	statuses := make([]int, 0)
+	responseSnippets := make([]string, 0)
+	for _, event := range all {
+		status := extractHTTPStatus(event.Payload)
+		if status != 0 {
+			statuses = append(statuses, status)
+			responseSnippets = append(responseSnippets, responseSnippet(event.Payload, status))
+		}
+	}
+	sort.Ints(statuses)
+	if len(statuses) > 0 {
+		last := statuses[len(statuses)-1]
+		snippet := responseSnippets[len(responseSnippets)-1]
+		switch {
+		case last >= 200 && last < 300:
+			return fmt.Sprintf("依据 HTTP 响应状态码 %d 判定为攻击成功", last), snippet
+		case last >= 300 && last < 400:
+			return fmt.Sprintf("依据 HTTP 重定向状态码 %d 判定为攻击尝试", last), snippet
+		case last >= 400:
+			return fmt.Sprintf("依据 HTTP 响应状态码 %d 判定为攻击失败", last), snippet
+		}
+	}
+	for _, event := range all {
+		method := extractHTTPMethod(event.Payload)
+		url := extractHTTPURL(event.Payload)
+		if method != "" || url != "" {
+			return fmt.Sprintf("观察到请求 %s %s，但缺少可靠成功响应，判定为%s", blankAs(method, "HTTP"), blankAs(url, "目标资源"), formatAttackResultText(attackResult)), ""
+		}
+	}
+	return fmt.Sprintf("缺少可用于判定的响应包，当前结果为%s", formatAttackResultText(attackResult)), ""
+}
+
+func buildRelatedAlertTimeline(relation string, current shared.Alert, alerts []shared.Alert, rawEvents []shared.RawEvent) []shared.AlertTimelineItem {
+	items := make([]shared.AlertTimelineItem, 0, len(alerts)+len(rawEvents))
+	seen := make(map[string]struct{}, len(alerts)+len(rawEvents))
+	for _, alert := range alerts {
+		if _, ok := seen[alert.ID]; ok {
+			continue
+		}
+		seen[alert.ID] = struct{}{}
+		items = append(items, shared.AlertTimelineItem{
+			Timestamp:    alert.LastSeenAt,
+			Relation:     relation,
+			ItemKind:     "aggregate",
+			EventType:    "alert",
+			Title:        alert.Signature,
+			Summary:      fmt.Sprintf("%s -> %s:%d · %s · %s · %d 次", alert.SrcIP, alert.DstIP, alert.DstPort, formatAttackResultText(alert.AttackResult), formatSeverityText(alert.Severity), alert.EventCount),
+			AlertID:      alert.ID,
+			SrcIP:        alert.SrcIP,
+			DstIP:        alert.DstIP,
+			AttackResult: alert.AttackResult,
+		})
+	}
+	for _, event := range rawEvents {
+		switch relation {
+		case "source":
+			if event.Payload.SrcIP != current.SrcIP {
+				continue
+			}
+		case "target":
+			if event.Payload.DstIP != current.DstIP {
+				continue
+			}
+		default:
+			continue
+		}
+		item := shared.AlertTimelineItem{
+			Timestamp:  event.EventTime,
+			Relation:   relation,
+			ItemKind:   "protocol",
+			EventType:  event.Payload.EventType,
+			Title:      flowTimelineTitle(event),
+			Summary:    flowTimelineSummary(event),
+			RawEventID: event.ID,
+			FlowID:     event.Payload.FlowID,
+			ProbeID:    event.ProbeID,
+			SrcIP:      event.Payload.SrcIP,
+			DstIP:      event.Payload.DstIP,
+		}
+		if strings.EqualFold(event.Payload.EventType, "alert") {
+			item.ItemKind = "raw"
+			item.AttackResult = rawAlertItemFromEvent(event).AttackResult
+		}
+		key := "raw:" + event.ID
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].Timestamp.Before(items[j].Timestamp)
+	})
+	return items
+}
+
+func buildFlowTimeline(events []shared.RawEvent, contextEvents []shared.RawEvent) []shared.AlertTimelineItem {
+	all := append([]shared.RawEvent{}, events...)
+	all = append(all, contextEvents...)
+	items := make([]shared.AlertTimelineItem, 0, len(all))
+	seen := make(map[string]struct{}, len(all))
+	for _, event := range all {
+		key := event.ID
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		items = append(items, shared.AlertTimelineItem{
+			Timestamp:  event.EventTime,
+			Relation:   "flow",
+			ItemKind:   "protocol",
+			EventType:  event.Payload.EventType,
+			Title:      flowTimelineTitle(event),
+			Summary:    flowTimelineSummary(event),
+			RawEventID: event.ID,
+			FlowID:     event.Payload.FlowID,
+			ProbeID:    event.ProbeID,
+			SrcIP:      event.Payload.SrcIP,
+			DstIP:      event.Payload.DstIP,
+		})
+		if strings.EqualFold(event.Payload.EventType, "alert") {
+			items[len(items)-1].ItemKind = "raw"
+			items[len(items)-1].AttackResult = rawAlertItemFromEvent(event).AttackResult
+		}
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].Timestamp.Before(items[j].Timestamp)
+	})
+	return items
+}
+
+func flowTimelineTitle(event shared.RawEvent) string {
+	switch strings.ToLower(strings.TrimSpace(event.Payload.EventType)) {
+	case "alert":
+		if event.Payload.Alert != nil && event.Payload.Alert.Signature != "" {
+			return event.Payload.Alert.Signature
+		}
+	case "http":
+		method := extractHTTPMethod(event.Payload)
+		url := extractHTTPURL(event.Payload)
+		if method != "" || url != "" {
+			return strings.TrimSpace(method + " " + url)
+		}
+	case "dns":
+		if value := extractDNSName(event.Payload); value != "" {
+			return value
+		}
+	case "tls":
+		if value := extractTLSSNI(event.Payload); value != "" {
+			return value
+		}
+	}
+	return fmt.Sprintf("%s 事件", strings.ToUpper(blankAs(event.Payload.EventType, "raw")))
+}
+
+func flowTimelineSummary(event shared.RawEvent) string {
+	switch strings.ToLower(strings.TrimSpace(event.Payload.EventType)) {
+	case "alert":
+		if event.Payload.Alert != nil {
+			return fmt.Sprintf("%s · %s", event.Payload.Alert.Category, formatAttackResultText(rawAlertItemFromEvent(event).AttackResult))
+		}
+	case "http":
+		status := extractHTTPStatus(event.Payload)
+		host := extractHTTPHost(event.Payload)
+		if status != 0 || host != "" {
+			return fmt.Sprintf("主机 %s · HTTP %s", blankAs(host, "-"), blankAs(fmt.Sprintf("%d", status), "-"))
+		}
+	case "dns":
+		return fmt.Sprintf("DNS 查询 %s", blankAs(extractDNSName(event.Payload), "-"))
+	case "tls":
+		return fmt.Sprintf("TLS SNI %s", blankAs(extractTLSSNI(event.Payload), "-"))
+	}
+	return fmt.Sprintf("%s:%d -> %s:%d · %s", event.Payload.SrcIP, event.Payload.SrcPort, event.Payload.DstIP, event.Payload.DstPort, strings.ToUpper(blankAs(event.Payload.AppProto, event.Payload.Proto)))
+}
+
+func extractHTTPStatus(event shared.SuricataEvent) int {
+	httpPayload, _ := event.Payload["http"].(map[string]any)
+	for _, value := range []any{
+		httpPayload["status"],
+		event.Payload["status"],
+		event.Payload["http_status"],
+	} {
+		switch typed := value.(type) {
+		case int:
+			return typed
+		case int32:
+			return int(typed)
+		case int64:
+			return int(typed)
+		case float64:
+			return int(typed)
+		case string:
+			var parsed int
+			if _, err := fmt.Sscanf(strings.TrimSpace(typed), "%d", &parsed); err == nil {
+				return parsed
+			}
+		}
+	}
+	return 0
+}
+
+func extractHTTPMethod(event shared.SuricataEvent) string {
+	httpPayload, _ := event.Payload["http"].(map[string]any)
+	return firstNonEmptyString(httpPayload["http_method"], event.Payload["http_method"], event.Payload["method"])
+}
+
+func extractHTTPURL(event shared.SuricataEvent) string {
+	httpPayload, _ := event.Payload["http"].(map[string]any)
+	return firstNonEmptyString(httpPayload["url"], event.Payload["url"], event.Payload["uri"])
+}
+
+func extractHTTPHost(event shared.SuricataEvent) string {
+	httpPayload, _ := event.Payload["http"].(map[string]any)
+	return firstNonEmptyString(httpPayload["hostname"], httpPayload["host"], event.Payload["hostname"], event.Payload["host"])
+}
+
+func extractDNSName(event shared.SuricataEvent) string {
+	dnsPayload, _ := event.Payload["dns"].(map[string]any)
+	return firstNonEmptyString(dnsPayload["rrname"], dnsPayload["query"], event.Payload["rrname"])
+}
+
+func extractTLSSNI(event shared.SuricataEvent) string {
+	tlsPayload, _ := event.Payload["tls"].(map[string]any)
+	return firstNonEmptyString(tlsPayload["sni"], event.Payload["sni"])
+}
+
+func firstNonEmptyString(values ...any) string {
+	for _, value := range values {
+		switch typed := value.(type) {
+		case string:
+			if strings.TrimSpace(typed) != "" {
+				return typed
+			}
+		case fmt.Stringer:
+			rendered := strings.TrimSpace(typed.String())
+			if rendered != "" {
+				return rendered
+			}
+		}
+	}
+	return ""
+}
+
+func blankAs(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
+func formatSeverityText(severity int) string {
+	switch severity {
+	case 1:
+		return "高危"
+	case 2:
+		return "中危"
+	case 3:
+		return "低危"
+	default:
+		return "未知"
+	}
+}
+
+func formatAttackResultText(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "success":
+		return "攻击成功"
+	case "failed":
+		return "攻击失败"
+	case "attempted":
+		return "攻击尝试"
+	default:
+		return "攻击结果未知"
+	}
+}
+
+func responseSnippet(event shared.SuricataEvent, status int) string {
+	body := firstNonEmptyString(
+		event.Payload["http_response_body"],
+		nestedObjectValue(event.Payload, "http", "http_response_body"),
+		event.Payload["response_body"],
+	)
+	body = summarizeForSnippet(body)
+	if body != "" {
+		return fmt.Sprintf("HTTP %d · %s", status, body)
+	}
+	return fmt.Sprintf("HTTP %d", status)
+}
+
+func nestedObjectValue(root map[string]any, key string, nested string) any {
+	if root == nil {
+		return nil
+	}
+	child, _ := root[key].(map[string]any)
+	if child == nil {
+		return nil
+	}
+	return child[nested]
+}
+
+func summarizeForSnippet(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	if decoded, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(trimmed, "\n", "")); err == nil {
+		decodedText := strings.TrimSpace(string(decoded))
+		if decodedText != "" {
+			trimmed = decodedText
+		}
+	}
+	if len(trimmed) > 180 {
+		return trimmed[:180] + " ..."
+	}
+	return trimmed
+}
+
+func maxInt(left, right int) int {
+	if left > right {
+		return left
+	}
+	return right
+}
+
+func (s *Service) canAccessRawAlertItem(ctx context.Context, user shared.User, item shared.RawAlertItem) bool {
+	if len(user.AllowedProbeIDs) > 0 && !containsString(user.Permissions, "*") && !contains(user.AllowedProbeIDs, item.ProbeID) {
+		return false
+	}
+	assetIDs, _, err := s.resolveScopeAssets(ctx, user, item.TenantID)
+	if err != nil {
+		return false
+	}
+	if len(assetIDs) == 0 {
+		return true
+	}
+	srcAsset, srcOK, err := s.store.FindAssetByIP(ctx, item.TenantID, item.SrcIP)
+	if err == nil && srcOK && contains(assetIDs, srcAsset.ID) {
+		return true
+	}
+	dstAsset, dstOK, err := s.store.FindAssetByIP(ctx, item.TenantID, item.DstIP)
+	if err == nil && dstOK && contains(assetIDs, dstAsset.ID) {
+		return true
+	}
+	return false
+}
+
+func rawAlertItemFromEvent(event shared.RawEvent) shared.RawAlertItem {
+	return shared.RawAlertItem{
+		ID:           event.ID,
+		TenantID:     event.TenantID,
+		ProbeID:      event.ProbeID,
+		EventTime:    event.EventTime,
+		SrcIP:        event.Payload.SrcIP,
+		SrcPort:      event.Payload.SrcPort,
+		DstIP:        event.Payload.DstIP,
+		DstPort:      event.Payload.DstPort,
+		Proto:        event.Payload.Proto,
+		AppProto:     event.Payload.AppProto,
+		FlowID:       event.Payload.FlowID,
+		SignatureID:  event.Payload.Alert.SignatureID,
+		Signature:    event.Payload.Alert.Signature,
+		Category:     event.Payload.Alert.Category,
+		Severity:     event.Payload.Alert.Severity,
+		AttackResult: pipeline.DeriveAttackResult(event.Payload),
+	}
+}
+
+func mergeAttackResult(current, next string) string {
+	rank := map[string]int{
+		"unknown":   0,
+		"attempted": 1,
+		"failed":    2,
+		"success":   3,
+	}
+	current = strings.ToLower(strings.TrimSpace(current))
+	next = strings.ToLower(strings.TrimSpace(next))
+	if current == "" {
+		current = "unknown"
+	}
+	if next == "" {
+		next = "unknown"
+	}
+	if rank[next] > rank[current] {
+		return next
+	}
+	return current
 }
 
 func topTrend(values map[string]int, limit int) []shared.TrendPoint {

@@ -49,15 +49,16 @@
 
           <section id="page-overview" class="page active">
             <div class="card page-card">
+              <div class="panel-head"><h2>角色工作台</h2><span id="overview-role-label">按当前角色展示重点入口</span></div>
+              <div id="overview-role-banner" class="role-banner"></div>
+              <ul id="overview-recommended-list" class="list compact-list"></ul>
+              <div id="overview-focus-cards" class="focus-grid"></div>
+            </div>
+            <div class="card page-card">
               <div class="panel-head"><h2>模块入口</h2><span>按当前用户权限展示</span></div>
               <div id="overview-cards" class="module-grid"></div>
             </div>
-            <div class="stats-grid">
-              <article class="card stat"><span>告警数</span><strong id="stat-alerts">0</strong></article>
-              <article class="card stat"><span>在线探针</span><strong id="stat-probes">0</strong></article>
-              <article class="card stat"><span>工单数</span><strong id="stat-tickets">0</strong></article>
-              <article class="card stat"><span>流量会话</span><strong id="stat-flows">0</strong></article>
-            </div>
+            <div id="overview-stats" class="stats-grid"></div>
           </section>
 
           <section id="page-alerts" class="page hidden">
@@ -73,6 +74,15 @@
                   <input id="alert-status-filter" placeholder="状态" />
                   <input id="alert-category-filter" placeholder="攻击类型 / 分类" />
                   <input id="alert-probe-filter" placeholder="探针 ID" />
+                  <select id="alert-attack-result-filter">
+                    <option value="">攻击结果</option>
+                    <option value="success">成功</option>
+                    <option value="failed">失败</option>
+                    <option value="attempted">尝试</option>
+                    <option value="unknown">未知</option>
+                  </select>
+                  <input id="alert-probe-count-filter" placeholder="跨探针数 >= " />
+                  <input id="alert-window-filter" placeholder="聚合窗口 >= 分钟" />
                 </div>
                 <div class="alert-toolbar-actions">
                   <input id="alert-since-filter" type="datetime-local" />
@@ -90,6 +100,9 @@
                     <option value="20">每页 20 条</option>
                     <option value="50">每页 50 条</option>
                   </select>
+                  <button id="alert-batch-ack-btn" class="ghost" type="button">批量确认</button>
+                  <button id="alert-batch-close-btn" class="ghost" type="button">批量关闭</button>
+                  <button id="alert-batch-ticket-btn" class="ghost" type="button">批量转工单</button>
                   <button id="export-alerts-btn" class="ghost" type="button">导出当前结果</button>
                 </div>
               </div>
@@ -97,6 +110,7 @@
                 <table class="alert-table">
                   <thead>
                     <tr>
+                      <th><input id="alerts-select-all" type="checkbox" /></th>
                       <th>最近发生时间</th>
                       <th>攻击类型</th>
                       <th>告警名称</th>
@@ -104,6 +118,7 @@
                       <th>源 IP</th>
                       <th>目的 IP</th>
                       <th>目标资产</th>
+                      <th>攻击结果</th>
                       <th>状态</th>
                       <th>风险分</th>
                       <th>次数</th>
@@ -122,6 +137,74 @@
                   <button id="alerts-next-btn" class="ghost" type="button">下一页</button>
                 </div>
               </div>
+            </div>
+          </section>
+
+          <section id="page-raw-alerts" class="page hidden">
+            <div class="card page-card">
+              <div class="panel-head"><h2>原始告警检索</h2><span>查看所有未聚合的原始命中事件</span></div>
+              <div class="filter-grid">
+                <input id="raw-alert-src-filter" placeholder="源 IP" />
+                <input id="raw-alert-dst-filter" placeholder="目的 IP" />
+                <input id="raw-alert-signature-filter" placeholder="告警名称 / 签名" />
+                <input id="raw-alert-probe-filter" placeholder="探针 ID" />
+                <input id="raw-alert-severity-filter" placeholder="等级（1/2/3）" />
+                <select id="raw-alert-attack-result-filter">
+                  <option value="">攻击结果</option>
+                  <option value="success">成功</option>
+                  <option value="failed">失败</option>
+                  <option value="attempted">尝试</option>
+                  <option value="unknown">未知</option>
+                </select>
+                <input id="raw-alert-since-filter" type="datetime-local" />
+                <select id="raw-alert-page-size">
+                  <option value="20">每页 20 条</option>
+                  <option value="50">每页 50 条</option>
+                  <option value="100">每页 100 条</option>
+                </select>
+              </div>
+              <div class="alert-table-wrap">
+                <table class="alert-table">
+                  <thead>
+                    <tr>
+                      <th>发生时间</th>
+                      <th>告警名称</th>
+                      <th>告警等级</th>
+                      <th>源 IP</th>
+                      <th>目的 IP</th>
+                      <th>协议</th>
+                      <th>探针</th>
+                      <th>攻击结果</th>
+                    </tr>
+                  </thead>
+                  <tbody id="raw-alerts-body"></tbody>
+                </table>
+              </div>
+              <div class="list-footer">
+                <div id="raw-alerts-total-info" class="muted">共 0 条</div>
+                <div class="detail-actions">
+                  <button id="raw-alerts-prev-btn" class="ghost" type="button">上一页</button>
+                  <span id="raw-alerts-page-info">第 1 页</span>
+                  <input id="raw-alerts-page-jump" type="number" min="1" placeholder="页码" />
+                  <button id="raw-alerts-jump-btn" class="ghost" type="button">跳转</button>
+                  <button id="raw-alerts-next-btn" class="ghost" type="button">下一页</button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section id="page-raw-alert-detail" class="page hidden">
+            <div class="card page-card">
+              <div class="panel-head">
+                <div>
+                  <h2>原始告警详情</h2>
+                  <span id="raw-alert-detail-badge">未选择</span>
+                </div>
+                <div class="detail-actions">
+                  <button id="back-to-raw-alerts-btn" class="ghost" type="button">返回原始告警列表</button>
+                </div>
+              </div>
+              <div id="raw-alert-detail" class="detail-empty">点击原始告警查看详情</div>
             </div>
           </section>
 
@@ -193,8 +276,26 @@
                   <option value="20">每页 20 条</option>
                   <option value="50">每页 50 条</option>
                 </select>
+                <button id="ticket-batch-progress-btn" class="ghost" type="button">批量开始处理</button>
+                <button id="ticket-batch-close-btn" class="ghost" type="button">批量关闭</button>
               </div>
-              <ul id="tickets-list" class="list"></ul>
+              <div class="alert-table-wrap">
+                <table class="alert-table">
+                  <thead>
+                    <tr>
+                      <th><input id="tickets-select-all" type="checkbox" /></th>
+                      <th>创建时间</th>
+                      <th>工单标题</th>
+                      <th>状态</th>
+                      <th>优先级</th>
+                      <th>处理人</th>
+                      <th>SLA</th>
+                      <th>关联告警</th>
+                    </tr>
+                  </thead>
+                  <tbody id="tickets-body"></tbody>
+                </table>
+              </div>
               <div class="detail-actions">
                 <button id="tickets-prev-btn" class="ghost" type="button">上一页</button>
                 <span id="tickets-page-info">第 1 页</span>
@@ -203,8 +304,19 @@
                 <button id="tickets-next-btn" class="ghost" type="button">下一页</button>
               </div>
             </div>
+          </section>
+
+          <section id="page-ticket-detail" class="page hidden">
             <div class="card page-card">
-              <div class="panel-head"><h2>工单详情</h2></div>
+              <div class="panel-head">
+                <div>
+                  <h2>工单详情</h2>
+                  <span id="ticket-detail-badge">未选择</span>
+                </div>
+                <div class="detail-actions">
+                  <button id="back-to-tickets-btn" class="ghost" type="button">返回工单列表</button>
+                </div>
+              </div>
               <div id="ticket-detail" class="detail-empty">点击工单查看详情</div>
               <div class="detail-actions">
                 <button id="ticket-progress-btn" class="ghost" type="button">开始处理</button>
@@ -216,10 +328,38 @@
           <section id="page-probes" class="page hidden">
             <div class="card page-card">
               <div class="panel-head"><h2>探针管理</h2></div>
-              <ul id="probes-list" class="list"></ul>
+              <div class="alert-table-wrap">
+                <table class="alert-table">
+                  <thead>
+                    <tr>
+                      <th>探针名称</th>
+                      <th>状态</th>
+                      <th>探针编码</th>
+                      <th>最近心跳</th>
+                      <th>运行状态</th>
+                      <th>版本</th>
+                      <th>已应用配置</th>
+                      <th>已应用规则</th>
+                      <th>下发状态</th>
+                    </tr>
+                  </thead>
+                  <tbody id="probes-body"></tbody>
+                </table>
+              </div>
             </div>
+          </section>
+
+          <section id="page-probe-detail" class="page hidden">
             <div class="card page-card">
-              <div class="panel-head"><h2>探针详情</h2></div>
+              <div class="panel-head">
+                <div>
+                  <h2>探针详情</h2>
+                  <span id="probe-detail-badge">未选择</span>
+                </div>
+                <div class="detail-actions">
+                  <button id="back-to-probes-btn" class="ghost" type="button">返回探针列表</button>
+                </div>
+              </div>
               <div class="filter-grid">
                 <input id="probe-metrics-since-filter" type="datetime-local" />
                 <select id="probe-metrics-limit-filter">
@@ -244,6 +384,9 @@
                 </div>
               </div>
             </div>
+          </section>
+
+          <section id="page-probes-manage" class="page hidden">
             <div class="card page-card">
               <div class="panel-head"><h2>探针配置模板</h2></div>
               <ul id="probe-configs-list" class="list"></ul>
@@ -270,6 +413,7 @@
               <ul id="upgrade-packages-list" class="list log-list"></ul>
               <form id="upgrade-package-form" class="stack compact">
                 <input name="version" placeholder="版本号" />
+                <input name="package_file" type="file" />
                 <input name="package_url" placeholder="升级包地址" />
                 <input name="checksum" placeholder="校验值" />
                 <input name="notes" placeholder="备注" />
@@ -338,11 +482,26 @@
 
           <section id="page-assets" class="page hidden">
             <div class="card page-card">
+              <div class="panel-head"><h2>组织层级</h2><span>组织树和资产归属</span></div>
+              <ul id="organizations-list" class="list"></ul>
+              <form id="organization-form" class="stack compact">
+                <input name="name" placeholder="组织名称" />
+                <input name="code" placeholder="组织编码" />
+                <select name="parent_id" id="organization-parent-select">
+                  <option value="">根组织</option>
+                </select>
+                <button type="submit">创建组织</button>
+              </form>
+            </div>
+            <div class="card page-card">
               <div class="panel-head"><h2>资产中心</h2><span>IP 资产映射和重要度</span></div>
               <ul id="assets-list" class="list"></ul>
               <form id="asset-form" class="stack compact">
                 <input name="name" placeholder="资产名称" />
                 <input name="ip" placeholder="IP 地址" />
+                <select name="org_id" id="asset-org-select">
+                  <option value="">未归属组织</option>
+                </select>
                 <input name="asset_type" placeholder="资产类型" />
                 <input name="importance_level" placeholder="重要等级，例如 high（高）" value="high" />
                 <input name="owner" placeholder="责任人" />
@@ -427,9 +586,16 @@
                 <input name="username" placeholder="用户名" />
                 <input name="display_name" placeholder="显示名称" />
                 <input name="password" placeholder="密码" />
-                <input name="roles" placeholder="角色，逗号分隔" />
+                <select name="role_template" id="user-role-template">
+                  <option value="system_admin">系统管理员</option>
+                  <option value="security_operator">安全运营人员</option>
+                  <option value="security_analyst">安全分析人员</option>
+                  <option value="auditor">审计人员</option>
+                </select>
                 <input name="allowed_tenants" placeholder="允许租户，逗号分隔" />
                 <input name="allowed_probe_ids" placeholder="允许探针 ID，逗号分隔" />
+                <select name="allowed_asset_ids" id="user-asset-scope" multiple size="5"></select>
+                <select name="allowed_org_ids" id="user-org-scope" multiple size="5"></select>
                 <button type="submit">创建用户</button>
               </form>
             </div>

@@ -366,8 +366,46 @@ func buildAlertFilters(query shared.AlertQuery) []map[string]any {
 	if query.Severity > 0 {
 		filters = append(filters, map[string]any{"term": map[string]any{"severity": query.Severity}})
 	}
+	if query.AttackResult != "" {
+		filters = append(filters, map[string]any{"term": map[string]any{"attack_result.keyword": query.AttackResult}})
+	}
 	if !query.Since.IsZero() {
 		filters = append(filters, map[string]any{"range": map[string]any{"last_seen_at": map[string]any{"gte": query.Since.Format(time.RFC3339)}}})
+	}
+	if query.MinProbeCount > 0 || query.MaxProbeCount > 0 {
+		rangeBody := map[string]any{}
+		if query.MinProbeCount > 0 {
+			rangeBody["gte"] = query.MinProbeCount
+		}
+		if query.MaxProbeCount > 0 {
+			rangeBody["lte"] = query.MaxProbeCount
+		}
+		filters = append(filters, map[string]any{"range": map[string]any{"probe_count": rangeBody}})
+	}
+	if query.MinWindowMins > 0 || query.MaxWindowMins > 0 {
+		rangeBody := map[string]any{}
+		if query.MinWindowMins > 0 {
+			rangeBody["gte"] = query.MinWindowMins
+		}
+		if query.MaxWindowMins > 0 {
+			rangeBody["lte"] = query.MaxWindowMins
+		}
+		filters = append(filters, map[string]any{"range": map[string]any{"window_minutes": rangeBody}})
+	}
+	if len(query.AllowedAssetIDs) > 0 {
+		should := make([]map[string]any, 0, len(query.AllowedAssetIDs)*2)
+		for _, id := range query.AllowedAssetIDs {
+			should = append(should,
+				map[string]any{"term": map[string]any{"source_asset_id.keyword": id}},
+				map[string]any{"term": map[string]any{"target_asset_id.keyword": id}},
+			)
+		}
+		filters = append(filters, map[string]any{
+			"bool": map[string]any{
+				"should":               should,
+				"minimum_should_match": 1,
+			},
+		})
 	}
 	return filters
 }
@@ -387,6 +425,21 @@ func buildFlowFilters(query shared.FlowQuery) []map[string]any {
 	}
 	if !query.Since.IsZero() {
 		filters = append(filters, map[string]any{"range": map[string]any{"seen_at": map[string]any{"gte": query.Since.Format(time.RFC3339)}}})
+	}
+	if len(query.AllowedIPs) > 0 {
+		should := make([]map[string]any, 0, len(query.AllowedIPs)*2)
+		for _, ip := range query.AllowedIPs {
+			should = append(should,
+				map[string]any{"term": map[string]any{"src_ip.keyword": ip}},
+				map[string]any{"term": map[string]any{"dst_ip.keyword": ip}},
+			)
+		}
+		filters = append(filters, map[string]any{
+			"bool": map[string]any{
+				"should":               should,
+				"minimum_should_match": 1,
+			},
+		})
 	}
 	return filters
 }
@@ -433,23 +486,26 @@ func alertIndexMapping() map[string]any {
 	return map[string]any{
 		"mappings": map[string]any{
 			"properties": map[string]any{
-				"id":            map[string]any{"type": "keyword"},
-				"tenant_id":     map[string]any{"type": "keyword"},
-				"fingerprint":   map[string]any{"type": "keyword"},
-				"first_seen_at": map[string]any{"type": "date"},
-				"last_seen_at":  map[string]any{"type": "date"},
-				"probe_ids":     map[string]any{"type": "keyword"},
-				"src_ip":        map[string]any{"type": "ip"},
-				"dst_ip":        map[string]any{"type": "ip"},
-				"dst_port":      map[string]any{"type": "integer"},
-				"proto":         map[string]any{"type": "keyword"},
-				"signature_id":  map[string]any{"type": "integer"},
-				"signature":     map[string]any{"type": "text", "fields": map[string]any{"keyword": map[string]any{"type": "keyword"}}},
-				"category":      map[string]any{"type": "keyword"},
-				"severity":      map[string]any{"type": "integer"},
-				"risk_score":    map[string]any{"type": "integer"},
-				"status":        map[string]any{"type": "keyword"},
-				"assignee":      map[string]any{"type": "keyword"},
+				"id":             map[string]any{"type": "keyword"},
+				"tenant_id":      map[string]any{"type": "keyword"},
+				"fingerprint":    map[string]any{"type": "keyword"},
+				"first_seen_at":  map[string]any{"type": "date"},
+				"last_seen_at":   map[string]any{"type": "date"},
+				"probe_ids":      map[string]any{"type": "keyword"},
+				"probe_count":    map[string]any{"type": "integer"},
+				"src_ip":         map[string]any{"type": "ip"},
+				"dst_ip":         map[string]any{"type": "ip"},
+				"dst_port":       map[string]any{"type": "integer"},
+				"proto":          map[string]any{"type": "keyword"},
+				"signature_id":   map[string]any{"type": "integer"},
+				"signature":      map[string]any{"type": "text", "fields": map[string]any{"keyword": map[string]any{"type": "keyword"}}},
+				"category":       map[string]any{"type": "keyword"},
+				"severity":       map[string]any{"type": "integer"},
+				"risk_score":     map[string]any{"type": "integer"},
+				"attack_result":  map[string]any{"type": "keyword"},
+				"window_minutes": map[string]any{"type": "integer"},
+				"status":         map[string]any{"type": "keyword"},
+				"assignee":       map[string]any{"type": "keyword"},
 			},
 		},
 	}

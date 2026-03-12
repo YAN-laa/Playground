@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/yan/ndr-platform/internal/shared"
@@ -24,6 +25,20 @@ type persistedBatch struct {
 	FileName string
 	Size     int64
 	Batch    shared.EventBatch
+}
+
+type eveOffsetState struct {
+	Path    string    `json:"path"`
+	Offset  int64     `json:"offset"`
+	Size    int64     `json:"size"`
+	ModTime time.Time `json:"mod_time"`
+	Inode   uint64    `json:"inode"`
+}
+
+type eveTracker struct {
+	path      string
+	stateFile string
+	state     eveOffsetState
 }
 
 func main() {
@@ -40,6 +55,7 @@ func main() {
 	bufferDir := flag.String("buffer-dir", "", "directory used to persist failed event batches")
 	bufferMaxFiles := flag.Int("buffer-max-files", intEnv("NDR_BUFFER_MAX_FILES", 200), "maximum buffered batch files before oldest files are pruned")
 	bufferMaxBytes := flag.Int64("buffer-max-bytes", int64Env("NDR_BUFFER_MAX_BYTES", 64*1024*1024), "maximum buffered bytes before oldest files are pruned")
+	eveStateFile := flag.String("eve-state-file", "", "state file used to persist eve.json offsets across restarts")
 	flag.Parse()
 
 	queueDir := *bufferDir
@@ -52,6 +68,17 @@ func main() {
 	}
 	if err := os.MkdirAll(queueDir, 0o755); err != nil {
 		log.Fatalf("prepare buffer dir failed: %v", err)
+	}
+
+	if path := os.Getenv("NDR_EVE_FILE"); path != "" {
+		statePath := strings.TrimSpace(*eveStateFile)
+		if statePath == "" {
+			statePath = strings.TrimSpace(os.Getenv("NDR_EVE_STATE_FILE"))
+		}
+		if statePath == "" {
+			statePath = filepath.Join(queueDir, "eve-offset.json")
+		}
+		initEVETracker(path, statePath)
 	}
 
 	probe := register(*serverURL, shared.RegisterProbeRequest{
@@ -312,12 +339,17 @@ func postJSON(url string, body any, out any) error {
 	return nil
 }
 
-var (
-	eveFileOffset int64
-	eveFileSize   int64
-)
+var eveStateTracker *eveTracker
 
 func loadEvents() []shared.SuricataEvent {
+	if eveStateTracker != nil {
+		events, err := eveStateTracker.load()
+		if err != nil {
+			log.Printf("load eve events failed: path=%s err=%v", eveStateTracker.path, err)
+			return nil
+		}
+		return events
+	}
 	if path := os.Getenv("NDR_EVE_FILE"); path != "" {
 		events, err := loadEventsFromEVEFile(path)
 		if err != nil {
@@ -340,12 +372,60 @@ func loadEventsFromEVEFile(path string) ([]shared.SuricataEvent, error) {
 	if err != nil {
 		return nil, err
 	}
-	if info.Size() < eveFileOffset || info.Size() < eveFileSize {
-		eveFileOffset = 0
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, err
 	}
-	eveFileSize = info.Size()
+	reader := bufio.NewScanner(file)
+	reader.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
+	events := make([]shared.SuricataEvent, 0)
+	for reader.Scan() {
+		line := reader.Bytes()
+		event, ok := decodeSuricataEVE(line)
+		if !ok {
+			continue
+		}
+		events = append(events, event)
+	}
+	if err := reader.Err(); err != nil {
+		return nil, err
+	}
+	_ = info
+	return events, nil
+}
 
-	if _, err := file.Seek(eveFileOffset, io.SeekStart); err != nil {
+func initEVETracker(path, stateFile string) {
+	tracker := &eveTracker{
+		path:      path,
+		stateFile: stateFile,
+		state: eveOffsetState{
+			Path: path,
+		},
+	}
+	if err := tracker.loadState(); err != nil {
+		log.Printf("load eve state failed: file=%s err=%v", stateFile, err)
+	}
+	eveStateTracker = tracker
+}
+
+func (t *eveTracker) load() ([]shared.SuricataEvent, error) {
+	file, err := os.Open(t.path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	currentInode := fileInode(info)
+	if t.state.Path != t.path || currentInode != 0 && t.state.Inode != 0 && currentInode != t.state.Inode {
+		t.state.Offset = 0
+	}
+	if info.Size() < t.state.Offset || info.Size() < t.state.Size {
+		t.state.Offset = 0
+	}
+	if _, err := file.Seek(t.state.Offset, io.SeekStart); err != nil {
 		return nil, err
 	}
 	reader := bufio.NewScanner(file)
@@ -364,10 +444,51 @@ func loadEventsFromEVEFile(path string) ([]shared.SuricataEvent, error) {
 	}
 	offset, err := file.Seek(0, io.SeekCurrent)
 	if err == nil {
-		eveFileOffset = offset
+		t.state.Offset = offset
 	}
-	eveFileSize = info.Size()
+	t.state.Path = t.path
+	t.state.Size = info.Size()
+	t.state.ModTime = info.ModTime().UTC()
+	t.state.Inode = currentInode
+	if err := t.saveState(); err != nil {
+		log.Printf("save eve state failed: file=%s err=%v", t.stateFile, err)
+	}
 	return events, nil
+}
+
+func (t *eveTracker) loadState() error {
+	data, err := os.ReadFile(t.stateFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	var state eveOffsetState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return err
+	}
+	t.state = state
+	return nil
+}
+
+func (t *eveTracker) saveState() error {
+	if err := os.MkdirAll(filepath.Dir(t.stateFile), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(t.state, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(t.stateFile, data, 0o644)
+}
+
+func fileInode(info os.FileInfo) uint64 {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat == nil {
+		return 0
+	}
+	return stat.Ino
 }
 
 type suricataEVEAlias struct {
