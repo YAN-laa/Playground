@@ -942,6 +942,76 @@ select[multiple] {
   color: var(--muted);
 }
 
+.protocol-filters {
+  margin-top: 0;
+  margin-bottom: 8px;
+}
+
+.protocol-filters .ghost.active {
+  background: rgba(15, 118, 110, 0.08);
+  border-color: rgba(15, 118, 110, 0.22);
+  color: var(--accent-2);
+}
+
+.protocol-panel {
+  padding-right: 6px;
+}
+
+.protocol-stream {
+  display: grid;
+  gap: 8px;
+}
+
+.http-view {
+  display: grid;
+  gap: 8px;
+}
+
+.http-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.http-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.http-column {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+
+.file-card {
+  border-color: rgba(245, 158, 11, 0.28);
+  background: linear-gradient(180deg, #fffef8, #ffffff 72%);
+}
+
+.file-highlight-card {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(245, 158, 11, 0.26);
+  background: linear-gradient(180deg, #fff8eb, #ffffff 78%);
+}
+
+.file-highlight-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tag-warm {
+  background: rgba(245, 158, 11, 0.12);
+  color: #b45309;
+  border: 1px solid rgba(245, 158, 11, 0.22);
+}
+
 .timeline-summary-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1093,14 +1163,16 @@ a:hover {
   .filter-grid,
   .report-grid,
   .metric-chart-grid,
-  .timeline-summary-grid {
+  .timeline-summary-grid,
+  .http-summary-grid {
     grid-template-columns: 1fr 1fr;
   }
 
   .alert-filter-grid,
   .alert-toolbar-actions,
   .alert-detail-layout,
-  .detail-meta-3 {
+  .detail-meta-3,
+  .http-columns {
     grid-template-columns: 1fr 1fr;
   }
 
@@ -1121,14 +1193,16 @@ a:hover {
   .detail-meta,
   .metric-chart-grid,
   .report-grid,
-  .timeline-summary-grid {
+  .timeline-summary-grid,
+  .http-summary-grid {
     grid-template-columns: 1fr;
   }
 
   .alert-filter-grid,
   .alert-toolbar-actions,
   .alert-detail-layout,
-  .detail-meta-3 {
+  .detail-meta-3,
+  .http-columns {
     grid-template-columns: 1fr;
   }
 

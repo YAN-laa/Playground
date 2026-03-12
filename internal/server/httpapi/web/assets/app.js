@@ -1268,8 +1268,8 @@ async function showAlertDetail(alertID, shouldNavigate = true) {
       ${renderTimelinePanel(detail.same_flow_timeline || [], 'flow')}
     </div>
     <div class="event-list detail-section">
-      <strong>协议与分析上下文</strong>
-      <div class="scroll-panel">${renderProtocolViews(detail)}</div>
+      <strong>分析上下文事件流</strong>
+      ${renderProtocolPanel(detail, 'alert-detail')}
     </div>
   `;
   document.querySelectorAll('[data-similar-mode]').forEach((button) => button.addEventListener('click', async () => {
@@ -1293,6 +1293,7 @@ async function showAlertDetail(alertID, shouldNavigate = true) {
     await navigate('raw-alerts', { page: 1, pageSize: state.rawAlertPageSize });
   }));
   bindTimelineFilters();
+  bindProtocolEventFilters();
 }
 
 function renderDecisionBasis(basis) {
@@ -1448,8 +1449,8 @@ async function showRawAlertDetail(rawAlertID, shouldNavigate = true) {
       <span>租户：${detail.item.tenant_id || '-'}</span>
     </div>
     <div class="event-list detail-section">
-      <strong>分析上下文</strong>
-      <div class="scroll-panel">${renderProtocolViews({ events: [detail.event], context_events: detail.context_events || [] })}</div>
+      <strong>分析上下文事件流</strong>
+      ${renderProtocolPanel({ events: [detail.event], context_events: detail.context_events || [] }, 'raw-alert-detail')}
     </div>
     <div class="event-list detail-section">
       <strong>关联流量</strong>
@@ -1472,6 +1473,7 @@ async function showRawAlertDetail(rawAlertID, shouldNavigate = true) {
     state.alertPage = 1;
     await navigate('alerts', { page: 1, pageSize: state.alertPageSize });
   }));
+  bindProtocolEventFilters();
 }
 
 async function showTicketDetail(ticketID, shouldNavigate = true) {
@@ -2144,50 +2146,33 @@ function renderInvestigationContext(detail) {
   return merged.map((event) => renderInvestigationEventCard(event)).join('');
 }
 
+function renderProtocolPanel(detail, scope) {
+  const merged = mergeInvestigationEvents(detail);
+  if (!merged.length) {
+    return '<code>暂无可用于研判的协议和上下文事件</code>';
+  }
+  return `
+    <div class="detail-actions protocol-filters">
+      <button class="ghost active" type="button" data-protocol-filter="${scope}" data-kind="all">全部</button>
+      <button class="ghost" type="button" data-protocol-filter="${scope}" data-kind="http">只看 HTTP</button>
+      <button class="ghost" type="button" data-protocol-filter="${scope}" data-kind="fileinfo">只看文件</button>
+      <button class="ghost" type="button" data-protocol-filter="${scope}" data-kind="flow">只看 Flow</button>
+    </div>
+    <div class="scroll-panel protocol-panel" data-protocol-scope="${scope}">
+      ${renderProtocolViews(detail)}
+    </div>
+  `;
+}
+
 function renderProtocolViews(detail) {
   const merged = mergeInvestigationEvents(detail);
   if (!merged.length) {
     return '<code>暂无可用于研判的协议和上下文事件</code>';
   }
-  const groups = {
-    alert: [],
-    http: [],
-    dns: [],
-    tls: [],
-    other: [],
-  };
-  for (const event of merged) {
-    const payload = event?.payload?.payload || event?.payload || {};
-    const key = String(payload.event_type || event?.event_type || '').toLowerCase();
-    if (groups[key]) {
-      groups[key].push(event);
-    } else {
-      groups.other.push(event);
-    }
-  }
-  return [
-    renderProtocolSection('攻击事件', groups.alert),
-    renderProtocolSection('HTTP 上下文', groups.http),
-    renderProtocolSection('DNS 上下文', groups.dns),
-    renderProtocolSection('TLS 上下文', groups.tls),
-    renderProtocolSection('其他上下文', groups.other),
-  ].filter(Boolean).join('');
-}
-
-function renderProtocolSection(title, events) {
-  if (!events || !events.length) {
-    return '';
-  }
   return `
-    <section class="protocol-section">
-      <div class="panel-head compact">
-        <h3>${title}</h3>
-        <span>${events.length} 条</span>
-      </div>
-      <div class="protocol-stack">
-        ${events.map((event) => renderInvestigationEventCard(event)).join('')}
-      </div>
-    </section>
+    <div class="protocol-stream">
+      ${merged.map((event) => renderInvestigationEventCard(event)).join('')}
+    </div>
   `;
 }
 
@@ -2218,25 +2203,20 @@ function mergeInvestigationEvents(detail) {
 
 function renderInvestigationEventCard(event) {
   const payload = event?.payload?.payload || event?.payload || {};
+  const eventKind = classifyInvestigationEvent(payload, event);
   const httpContext = extractHTTPContext(payload);
   const dnsContext = extractDNSContext(payload);
   const tlsContext = extractTLSContext(payload);
   const networkContext = extractNetworkContext(payload, event);
   const alertContext = extractAlertContext(payload, event);
   const fileContext = extractFileContext(payload);
-  const payloadContext = extractPayloadContext(payload);
+  const payloadContext = extractPayloadContext(payload, httpContext);
   const bodyBlocks = [];
-  if (httpContext?.requestBody) {
-    bodyBlocks.push(renderBodyBlock('请求体', httpContext.requestBody));
-  }
-  if (httpContext?.responseBody) {
-    bodyBlocks.push(renderBodyBlock('响应体', httpContext.responseBody));
-  }
   if (payloadContext) {
     bodyBlocks.push(renderBodyBlock(payloadContext.label, payloadContext.value));
   }
   return `
-    <div class="context-card">
+    <div class="context-card ${eventKind === 'fileinfo' ? 'file-card' : ''}" data-protocol-kind="${escapeHTML(eventKind)}">
       <div class="context-card-head">
         <div class="context-card-title">
           <span class="tag">${formatEventType(payload.event_type || event?.payload?.event_type || 'raw')}</span>
@@ -2250,7 +2230,7 @@ function renderInvestigationEventCard(event) {
       ${dnsContext ? renderContextGrid(dnsContext) : ''}
       ${tlsContext ? renderContextGrid(tlsContext) : ''}
       ${alertContext ? renderContextGrid(alertContext) : ''}
-      ${fileContext ? renderContextGrid(fileContext) : ''}
+      ${fileContext ? renderFileContext(fileContext) : ''}
       ${bodyBlocks.join('')}
     </div>
   `;
@@ -2285,13 +2265,32 @@ function renderBodyBlock(label, value) {
 
 function renderHTTPContext(context) {
   return `
-    <div class="context-grid">
-      ${context.method ? `<div class="context-field"><span>请求方法</span><strong>${escapeHTML(context.method)}</strong></div>` : ''}
-      ${context.url ? `<div class="context-field"><span>请求地址</span><strong>${escapeHTML(context.url)}</strong></div>` : ''}
-      ${context.host ? `<div class="context-field"><span>主机名</span><strong>${escapeHTML(context.host)}</strong></div>` : ''}
-      ${context.userAgent ? `<div class="context-field"><span>User-Agent</span><strong>${escapeHTML(context.userAgent)}</strong></div>` : ''}
-      ${context.contentType ? `<div class="context-field"><span>内容类型</span><strong>${escapeHTML(context.contentType)}</strong></div>` : ''}
-      ${context.status ? `<div class="context-field"><span>响应状态</span><strong>${escapeHTML(context.status)}</strong></div>` : ''}
+    <div class="http-view">
+      <div class="http-summary-grid">
+        ${context.method ? `<div class="context-field"><span>请求方法</span><strong>${escapeHTML(context.method)}</strong></div>` : ''}
+        ${context.url ? `<div class="context-field"><span>请求地址</span><strong>${escapeHTML(context.url)}</strong></div>` : ''}
+        ${context.host ? `<div class="context-field"><span>主机名</span><strong>${escapeHTML(context.host)}</strong></div>` : ''}
+        ${context.status ? `<div class="context-field"><span>响应状态</span><strong>${escapeHTML(context.status)}</strong></div>` : ''}
+        ${context.userAgent ? `<div class="context-field"><span>User-Agent</span><strong>${escapeHTML(context.userAgent)}</strong></div>` : ''}
+        ${context.contentType ? `<div class="context-field"><span>内容类型</span><strong>${escapeHTML(context.contentType)}</strong></div>` : ''}
+      </div>
+      <div class="http-columns">
+        <div class="http-column">
+          <div class="context-list">
+            <span>请求头</span>
+            ${context.requestHeaders?.length ? context.requestHeaders.map((item) => `<code>${escapeHTML(item.name)}: ${escapeHTML(item.value)}</code>`).join('') : '<code>暂无可用请求头</code>'}
+          </div>
+          ${context.requestBody ? renderBodyBlock('请求体', context.requestBody) : ''}
+        </div>
+        <div class="http-column">
+          <div class="context-list">
+            <span>响应信息</span>
+            ${context.status ? `<code>HTTP ${escapeHTML(context.status)}</code>` : '<code>暂无响应状态</code>'}
+            ${context.responseHeaders?.length ? context.responseHeaders.map((item) => `<code>${escapeHTML(item.name)}: ${escapeHTML(item.value)}</code>`).join('') : ''}
+          </div>
+          ${context.responseBody ? renderBodyBlock('响应体', context.responseBody) : ''}
+        </div>
+      </div>
     </div>
   `;
 }
@@ -2304,7 +2303,7 @@ function extractHTTPContext(payload) {
   const userAgent = firstNonEmpty(http.http_user_agent, payload.http_user_agent, payload.user_agent);
   const contentType = firstNonEmpty(http.http_content_type, payload.http_content_type, payload.content_type);
   const status = firstNonEmpty(http.status, payload.status, payload.http_status);
-  const requestBody = decodeBodyField(
+  const requestBodyRaw = decodeBodyField(
     firstNonEmpty(
       payload.http_body,
       payload['http-body'],
@@ -2314,8 +2313,16 @@ function extractHTTPContext(payload) {
       http.body,
     ),
   );
-  const responseBody = decodeBodyField(firstNonEmpty(payload.http_response_body, http.http_response_body, payload.response_body));
-  if (!method && !url && !host && !userAgent && !contentType && !status && !requestBody && !responseBody) {
+  const responseBodyRaw = decodeBodyField(firstNonEmpty(payload.http_response_body, http.http_response_body, payload.response_body));
+  const requestText = firstReadableHTTPText(
+    payload.payload_printable,
+    payload.payload,
+  );
+  const requestParsed = parseHTTPRequest(requestText);
+  const requestHeaders = filterUsefulHeaders(requestParsed.headers || []);
+  const requestBody = summarizeText(selectUsefulBody(requestBodyRaw || requestParsed.body, contentType), 1200);
+  const responseBody = summarizeText(selectUsefulBody(responseBodyRaw, contentType), 1200);
+  if (!method && !url && !host && !userAgent && !contentType && !status && !requestBody && !responseBody && !requestHeaders.length) {
     return null;
   }
   return {
@@ -2325,8 +2332,10 @@ function extractHTTPContext(payload) {
     userAgent,
     contentType,
     status,
-    requestBody: summarizeText(requestBody, 600),
-    responseBody: summarizeText(responseBody, 600),
+    requestHeaders,
+    responseHeaders: [],
+    requestBody,
+    responseBody,
   };
 }
 
@@ -2375,11 +2384,14 @@ function extractFileContext(payload) {
   if (!file || typeof file !== 'object') {
     return null;
   }
-  return [
-    { label: '关联文件', value: firstNonEmpty(file.filename) },
-    { label: '文件大小', value: firstNonEmpty(file.size) },
-    { label: '文件状态', value: firstNonEmpty(file.state) },
-  ];
+  return {
+    fileName: firstNonEmpty(file.filename),
+    size: firstNonEmpty(file.size),
+    state: firstNonEmpty(file.state),
+    stored: firstNonEmpty(file.stored),
+    gaps: firstNonEmpty(file.gaps),
+    txID: firstNonEmpty(file.tx_id, payload.tx_id),
+  };
 }
 
 function extractDNSContext(payload) {
@@ -2418,7 +2430,10 @@ function extractTLSContext(payload) {
   ];
 }
 
-function extractPayloadContext(payload) {
+function extractPayloadContext(payload, httpContext) {
+  if (httpContext?.requestHeaders?.length || httpContext?.requestBody || httpContext?.responseBody) {
+    return null;
+  }
   const printable = summarizeText(firstNonEmpty(payload.payload_printable), 500);
   if (printable) {
     return { label: '可读载荷摘要', value: printable };
@@ -2450,14 +2465,126 @@ function summarizeText(value, maxLength) {
 function formatEventType(value) {
   const normalized = String(value || '').toLowerCase();
   const mapping = {
-    alert: '告警事件',
-    http: 'HTTP 上下文',
-    dns: 'DNS 上下文',
-    tls: 'TLS 上下文',
-    fileinfo: '文件事件',
-    flow: '流量事件',
+    alert: '告警命中',
+    http: 'HTTP 请求/响应',
+    dns: 'DNS 解析',
+    tls: 'TLS 握手',
+    fileinfo: '文件传输信息',
+    flow: '流量会话',
   };
   return mapping[normalized] || (value || '事件');
+}
+
+function classifyInvestigationEvent(payload, event) {
+  const normalized = String(payload.event_type || event?.payload?.event_type || '').toLowerCase();
+  if (normalized === 'http' || normalized === 'dns' || normalized === 'tls' || normalized === 'flow' || normalized === 'fileinfo') {
+    return normalized;
+  }
+  if (Array.isArray(payload?.files) && payload.files.length) {
+    return 'fileinfo';
+  }
+  return normalized || 'other';
+}
+
+function renderFileContext(context) {
+  if (!context) return '';
+  return `
+    <div class="file-highlight-card">
+      <div class="file-highlight-head">
+        <span class="tag tag-warm">文件事件</span>
+        <strong>${escapeHTML(context.fileName || '未命名文件')}</strong>
+      </div>
+      <div class="context-grid">
+        ${context.size ? `<div class="context-field"><span>文件大小</span><strong>${escapeHTML(context.size)}</strong></div>` : ''}
+        ${context.state ? `<div class="context-field"><span>文件状态</span><strong>${escapeHTML(context.state)}</strong></div>` : ''}
+        ${context.stored ? `<div class="context-field"><span>是否落盘</span><strong>${escapeHTML(context.stored)}</strong></div>` : ''}
+        ${context.gaps ? `<div class="context-field"><span>是否缺包</span><strong>${escapeHTML(context.gaps)}</strong></div>` : ''}
+        ${context.txID ? `<div class="context-field"><span>事务 ID</span><strong>${escapeHTML(context.txID)}</strong></div>` : ''}
+      </div>
+    </div>
+  `;
+}
+
+function firstReadableHTTPText(...values) {
+  for (const value of values) {
+    const decoded = decodeBodyField(value);
+    if (!decoded) continue;
+    if (looksLikeHTTPRequest(decoded)) {
+      return decoded;
+    }
+  }
+  return '';
+}
+
+function looksLikeHTTPRequest(value) {
+  const text = String(value || '');
+  return /^(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+\S+\s+HTTP\/\d/i.test(text.trim());
+}
+
+function parseHTTPRequest(value) {
+  const text = String(value || '').replace(/\r\n/g, '\n');
+  if (!text.trim()) {
+    return { headers: [], body: '' };
+  }
+  const [head, ...bodyParts] = text.split('\n\n');
+  const lines = head.split('\n').map((line) => line.trim()).filter(Boolean);
+  const headers = [];
+  for (const line of lines.slice(1)) {
+    const index = line.indexOf(':');
+    if (index === -1) continue;
+    headers.push({ name: line.slice(0, index).trim(), value: line.slice(index + 1).trim() });
+  }
+  return {
+    headers,
+    body: bodyParts.join('\n\n').trim(),
+  };
+}
+
+function filterUsefulHeaders(headers) {
+  const allow = new Set(['host', 'user-agent', 'content-type', 'content-length', 'referer', 'x-forwarded-for', 'accept']);
+  return (headers || []).filter((item) => allow.has(String(item.name || '').toLowerCase()));
+}
+
+function selectUsefulBody(value, contentType) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const type = String(contentType || '').toLowerCase();
+  if (type.includes('json') || type.includes('xml') || type.includes('x-www-form-urlencoded') || type.includes('text') || looksStructuredContent(text)) {
+    return text;
+  }
+  if (isReadableAnalysisText(text)) {
+    return text;
+  }
+  return '';
+}
+
+function looksStructuredContent(value) {
+  const text = String(value || '').trim();
+  return text.startsWith('{') || text.startsWith('[') || text.startsWith('<') || text.includes('=');
+}
+
+function isReadableAnalysisText(value) {
+  const text = String(value || '').trim();
+  if (!text) return false;
+  const sample = text.slice(0, 400);
+  const printable = sample.replace(/[\x09\x0A\x0D\x20-\x7E]/g, '');
+  return printable.length < sample.length * 0.15;
+}
+
+function bindProtocolEventFilters() {
+  document.querySelectorAll('[data-protocol-filter]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const scope = button.dataset.protocolFilter;
+      const kind = button.dataset.kind || 'all';
+      document.querySelectorAll(`[data-protocol-filter="${scope}"]`).forEach((item) => {
+        item.classList.toggle('active', item === button);
+      });
+      document.querySelectorAll(`[data-protocol-scope="${scope}"] [data-protocol-kind]`).forEach((card) => {
+        const current = card.dataset.protocolKind || 'other';
+        card.classList.toggle('hidden', kind !== 'all' && current !== kind);
+      });
+    });
+  });
 }
 
 function decodeBodyField(value) {
