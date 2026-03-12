@@ -133,9 +133,13 @@ const rawAlertsTotalInfo = $('raw-alerts-total-info');
 const rawAlertDetailBadge = $('raw-alert-detail-badge');
 const rawAlertDetailPanel = $('raw-alert-detail');
 const backToAlertsBtn = $('back-to-alerts-btn');
+const backToAlertDetailBtn = $('back-to-alert-detail-btn');
 const backToRawAlertsBtn = $('back-to-raw-alerts-btn');
 const backToTicketsBtn = $('back-to-tickets-btn');
 const backToProbesBtn = $('back-to-probes-btn');
+const alertRelationTitle = $('alert-relation-title');
+const alertRelationBadge = $('alert-relation-badge');
+const alertRelationPanel = $('alert-relation-panel');
 const alertsSelectAllInput = $('alerts-select-all');
 const ticketsSelectAllInput = $('tickets-select-all');
 const flowSrcInput = $('flow-src-filter');
@@ -217,6 +221,10 @@ $('refresh-exports-btn').addEventListener('click', async () => loadExportTasks()
 $('refresh-query-stats-btn').addEventListener('click', async () => loadQueryStats());
 backToAlertsBtn.addEventListener('click', async () => {
   await navigate('alerts');
+});
+backToAlertDetailBtn.addEventListener('click', async () => {
+  if (!state.currentRoute?.alertID && !state.selectedAlert?.alert?.id) return;
+  await navigate('alert-detail', { alertID: state.currentRoute?.alertID || state.selectedAlert?.alert?.id });
 });
 backToRawAlertsBtn.addEventListener('click', async () => {
   await navigate('raw-alerts');
@@ -408,6 +416,13 @@ function buildRoute(page, options = {}) {
         alertID: options.alertID || state.selectedAlert?.alert?.id || '',
         hash: buildHash(`alerts/${encodeURIComponent(options.alertID || state.selectedAlert?.alert?.id || '')}`, params),
       };
+    case 'alert-relation':
+      return {
+        page,
+        alertID: options.alertID || state.selectedAlert?.alert?.id || '',
+        relation: options.relation || state.currentRoute?.relation || 'source',
+        hash: buildHash(`alerts/${encodeURIComponent(options.alertID || state.selectedAlert?.alert?.id || '')}/relations/${encodeURIComponent(options.relation || state.currentRoute?.relation || 'source')}`, params),
+      };
     case 'ticket-detail':
       return {
         page,
@@ -443,6 +458,15 @@ function parseRouteFromLocation() {
   if (!parts.length) {
     return { page: 'overview', hash: '#/overview', params };
   }
+  if (parts[0] === 'alerts' && parts[1] && parts[2] === 'relations' && parts[3]) {
+    return {
+      page: 'alert-relation',
+      alertID: decodeURIComponent(parts[1]),
+      relation: decodeURIComponent(parts[3]),
+      hash: buildHash(`alerts/${parts[1]}/relations/${parts[3]}`, params),
+      params,
+    };
+  }
   if (parts[0] === 'alerts' && parts[1]) {
     return { page: 'alert-detail', alertID: decodeURIComponent(parts[1]), hash: buildHash(`alerts/${parts[1]}`, params), params };
   }
@@ -461,15 +485,7 @@ function parseRouteFromLocation() {
 async function applyRouteFromLocation(fallbackToDefault = false) {
   let route = parseRouteFromLocation();
   const allowedPages = new Set(state.modules.map((module) => module.id));
-  const detailBasePage = route.page === 'alert-detail'
-    ? 'alerts'
-    : route.page === 'raw-alert-detail'
-      ? 'raw-alerts'
-    : route.page === 'ticket-detail'
-      ? 'tickets'
-      : route.page === 'probe-detail'
-        ? 'probes'
-        : route.page;
+  const detailBasePage = routeBasePage(route.page);
   if (!allowedPages.has(detailBasePage)) {
     route = { page: state.modules[0]?.id || 'overview', hash: `#/${state.modules[0]?.id || 'overview'}` };
   }
@@ -488,10 +504,12 @@ async function applyRoute(route) {
   const current = MODULES.find((item) => item.id === route.page);
   const pageTitle = route.page === 'alert-detail'
     ? '告警详情'
+    : route.page === 'alert-relation'
+      ? (route.relation === 'target' ? '同目标关系图' : '同源关系图')
     : route.page === 'raw-alert-detail'
       ? '原始告警详情'
-    : route.page === 'ticket-detail'
-      ? '工单详情'
+      : route.page === 'ticket-detail'
+        ? '工单详情'
       : route.page === 'probe-detail'
         ? '探针详情'
         : (current?.title || '总览');
@@ -507,15 +525,7 @@ async function applyRoute(route) {
     if (target) target.classList.remove('hidden');
   }
   document.querySelectorAll('.nav-btn').forEach((button) => {
-    const activeBase = route.page === 'alert-detail'
-      ? 'alerts'
-      : route.page === 'raw-alert-detail'
-        ? 'raw-alerts'
-      : route.page === 'ticket-detail'
-        ? 'tickets'
-        : route.page === 'probe-detail'
-          ? 'probes'
-          : route.page;
+    const activeBase = routeBasePage(route.page);
     button.classList.toggle('active', button.dataset.page === activeBase);
   });
   if (route.page === 'exports') {
@@ -529,11 +539,28 @@ function buildHash(path, params) {
   return `#/${path}${query ? `?${query}` : ''}`;
 }
 
+function routeBasePage(page) {
+  switch (page) {
+    case 'alert-detail':
+    case 'alert-relation':
+      return 'alerts';
+    case 'raw-alert-detail':
+      return 'raw-alerts';
+    case 'ticket-detail':
+      return 'tickets';
+    case 'probe-detail':
+      return 'probes';
+    default:
+      return page;
+  }
+}
+
 function buildRouteParams(page, options = {}) {
   const params = new URLSearchParams();
   switch (page) {
     case 'alerts':
     case 'alert-detail':
+    case 'alert-relation':
       appendIfValue(params, 'src', srcInput.value);
       appendIfValue(params, 'dst', dstInput.value);
       appendIfValue(params, 'signature', signatureInput.value);
@@ -601,6 +628,7 @@ function applyRouteState(route) {
   switch (route.page) {
     case 'alerts':
     case 'alert-detail':
+    case 'alert-relation':
       srcInput.value = params.get('src') || srcInput.value || '';
       dstInput.value = params.get('dst') || dstInput.value || '';
       signatureInput.value = params.get('signature') || signatureInput.value || '';
@@ -667,6 +695,11 @@ async function refreshCurrentPage() {
         await showAlertDetail(state.currentRoute.alertID, false);
       } else if (state.selectedAlert?.alert?.id) {
         await showAlertDetail(state.selectedAlert.alert.id, false);
+      }
+      break;
+    case 'alert-relation':
+      if (state.currentRoute?.alertID) {
+        await showAlertRelationGraph(state.currentRoute.alertID, state.currentRoute.relation || 'source', false);
       }
       break;
     case 'raw-alert-detail':
@@ -1201,7 +1234,7 @@ async function showAlertDetail(alertID, shouldNavigate = true) {
       <div>
         <div class="detail-subtitle">${detail.alert.category || '未分类'} · ${detail.alert.signature_id || '-'}</div>
         <strong>${detail.alert.signature}</strong>
-        <div class="cell-sub">聚合依据：源地址 + 目的地址 + 目的端口 + 协议 + 规则签名，30 分钟窗口，跨探针合并</div>
+        <div class="cell-sub">聚合依据：源地址 + 目的地址 + 目的端口 + 协议 + 规则签名，${detail.alert.window_minutes || 30} 分钟窗口，跨探针合并</div>
       </div>
       <div class="detail-score-card">
         <span class="severity-badge ${formatSeverityClass(detail.alert.severity)}">${formatSeverity(detail.alert.severity)}</span>
@@ -1224,8 +1257,8 @@ async function showAlertDetail(alertID, shouldNavigate = true) {
       <span>处理人：${detail.alert.assignee || '-'}</span>
     </div>
     <div class="event-list detail-section">
-      <strong>判定依据</strong>
-      ${renderDecisionBasis(detail.decision_basis)}
+      <strong>告警详情</strong>
+      ${renderAlertOverview(detail)}
     </div>
     <div class="event-list detail-section">
       <strong>情报命中</strong>
@@ -1246,26 +1279,11 @@ async function showAlertDetail(alertID, shouldNavigate = true) {
       </div>
     </div>
     <div class="event-list detail-section">
-      <strong>同源相似告警</strong>
-      <div class="detail-actions">
-        <button class="ghost" type="button" data-similar-mode="src" data-similar-value="${escapeHTML(detail.alert.src_ip || '')}">按同源联查</button>
+      <strong>关联关系</strong>
+      <div class="relation-entry-grid">
+        ${renderRelationEntryCard(detail, 'source')}
+        ${renderRelationEntryCard(detail, 'target')}
       </div>
-      ${(detail.similar_source_alerts || []).map((item) => `<code><a href="#/alerts/${encodeURIComponent(item.id)}">${item.signature}</a> · ${formatDateTime(item.last_seen_at)} · ${formatAttackResult(item.attack_result)}</code>`).join('') || '<code>暂无同源相似告警</code>'}
-    </div>
-    <div class="event-list detail-section">
-      <strong>同源时间线</strong>
-      ${renderTimelinePanel(detail.same_source_timeline || [], 'source')}
-    </div>
-    <div class="event-list detail-section">
-      <strong>同目标相似告警</strong>
-      <div class="detail-actions">
-        <button class="ghost" type="button" data-similar-mode="dst" data-similar-value="${escapeHTML(detail.alert.dst_ip || '')}">按同目标联查</button>
-      </div>
-      ${(detail.similar_target_alerts || []).map((item) => `<code><a href="#/alerts/${encodeURIComponent(item.id)}">${item.signature}</a> · ${formatDateTime(item.last_seen_at)} · ${formatAttackResult(item.attack_result)}</code>`).join('') || '<code>暂无同目标相似告警</code>'}
-    </div>
-    <div class="event-list detail-section">
-      <strong>同目标时间线</strong>
-      ${renderTimelinePanel(detail.same_target_timeline || [], 'target')}
     </div>
     <div class="event-list detail-section">
       <strong>同 Flow 时间线</strong>
@@ -1276,16 +1294,11 @@ async function showAlertDetail(alertID, shouldNavigate = true) {
       ${renderProtocolPanel(detail, 'alert-detail')}
     </div>
   `;
-  document.querySelectorAll('[data-similar-mode]').forEach((button) => button.addEventListener('click', async () => {
-    if (button.dataset.similarMode === 'src') {
-      srcInput.value = button.dataset.similarValue || '';
-      dstInput.value = '';
-    } else {
-      dstInput.value = button.dataset.similarValue || '';
-      srcInput.value = '';
-    }
-    state.alertPage = 1;
-    await navigate('alerts', { page: 1, pageSize: state.alertPageSize });
+  document.querySelectorAll('[data-alert-relation]').forEach((button) => button.addEventListener('click', async () => {
+    await navigate('alert-relation', {
+      alertID: detail.alert.id,
+      relation: button.dataset.alertRelation || 'source',
+    });
   }));
   document.querySelectorAll('[data-alert-raw-link]').forEach((button) => button.addEventListener('click', async () => {
     rawAlertSrcInput.value = detail.alert.src_ip || '';
@@ -1300,38 +1313,350 @@ async function showAlertDetail(alertID, shouldNavigate = true) {
   bindProtocolEventFilters();
 }
 
-function renderDecisionBasis(basis) {
-  if (!basis) {
-    return '<code>暂无判定依据</code>';
+async function showAlertRelationGraph(alertID, relation = 'source', shouldNavigate = true) {
+  if (shouldNavigate) {
+    alertRelationBadge.textContent = alertID;
+    alertRelationPanel.className = 'detail-card detail-hero';
+    alertRelationPanel.innerHTML = '<div class="detail-empty">正在加载关系图...</div>';
+    await navigate('alert-relation', { alertID, relation });
+    return;
   }
+  const detail = state.selectedAlert?.alert?.id === alertID
+    ? state.selectedAlert
+    : await request(`/api/v1/alerts/${alertID}/detail`);
+  if (detail?.error) return;
+  state.selectedAlert = detail;
+  const relationKey = relation === 'target' ? 'target' : 'source';
+  const graph = buildAlertRelationGraph(detail, relationKey);
+  alertRelationTitle.textContent = relationKey === 'target' ? '同目标关系图' : '同源关系图';
+  alertRelationBadge.textContent = `${detail.alert.id} · ${relationKey === 'target' ? detail.alert.dst_ip : detail.alert.src_ip}`;
+  alertRelationPanel.className = 'detail-card detail-hero';
+  alertRelationPanel.innerHTML = renderAlertRelationPage(detail, graph, relationKey);
+  document.querySelectorAll('[data-relation-node-filter]').forEach((button) => button.addEventListener('click', async () => {
+    const mode = button.dataset.relationNodeFilter;
+    if (mode === 'source') {
+      srcInput.value = button.dataset.nodeValue || '';
+      dstInput.value = '';
+    } else if (mode === 'target') {
+      dstInput.value = button.dataset.nodeValue || '';
+      srcInput.value = '';
+    }
+    state.alertPage = 1;
+    await navigate('alerts', { page: 1, pageSize: state.alertPageSize });
+  }));
+}
+
+function renderAlertOverview(detail) {
+  const basis = detail?.decision_basis || {};
+  const exchange = extractPrimaryHTTPExchange(detail);
   return `
-    <div class="context-card">
-      <div class="context-grid">
+    <div class="alert-overview-card">
+      <div class="context-grid alert-overview-grid">
         <div class="context-field">
           <span>攻击结果</span>
-          <strong>${escapeHTML(formatAttackResult(basis.attack_result))}</strong>
+          <strong>${escapeHTML(formatAttackResult(detail?.alert?.attack_result || basis.attack_result))}</strong>
         </div>
         <div class="context-field">
           <span>结果说明</span>
           <strong>${escapeHTML(basis.attack_result_reason || '缺少可判定依据')}</strong>
         </div>
-      </div>
-      <div class="context-list">
-        <span>聚合依据</span>
-        ${(basis.aggregation_reason || []).map((item) => `<code>${escapeHTML(item)}</code>`).join('') || '<code>暂无聚合依据</code>'}
-      </div>
-      <div class="context-list">
-        <span>风险依据</span>
-        ${(basis.risk_reason || []).map((item) => `<code>${escapeHTML(item)}</code>`).join('') || '<code>暂无风险依据</code>'}
-      </div>
-      ${basis.response_snippet ? `
-        <div class="context-body">
-          <span>原始响应片段</span>
-          <pre>${escapeHTML(basis.response_snippet)}</pre>
+        <div class="context-field">
+          <span>聚合窗口</span>
+          <strong>${escapeHTML(String(detail?.alert?.window_minutes || 30))} 分钟</strong>
         </div>
-      ` : ''}
+        <div class="context-field">
+          <span>跨探针数量</span>
+          <strong>${escapeHTML(String(detail?.alert?.probe_count || (detail?.alert?.probe_ids || []).length || 1))}</strong>
+        </div>
+      </div>
+      <div class="overview-reason-grid">
+        <div class="context-list">
+          <span>聚合依据</span>
+          ${(basis.aggregation_reason || []).map((item) => `<code>${escapeHTML(item)}</code>`).join('') || '<code>暂无聚合依据</code>'}
+        </div>
+        <div class="context-list">
+          <span>风险依据</span>
+          ${(basis.risk_reason || []).map((item) => `<code>${escapeHTML(item)}</code>`).join('') || '<code>暂无风险依据</code>'}
+        </div>
+      </div>
+      ${renderBurpExchange(exchange, basis)}
     </div>
   `;
+}
+
+function renderAlertRelationPage(detail, graph, relation) {
+  const relationLabel = relation === 'target' ? '同目标' : '同源';
+  return `
+    <div class="relation-page-grid">
+      <div class="timeline-summary-grid">
+        ${graph.summary.map((item) => `
+          <article class="card stat compact-stat">
+            <span>${escapeHTML(item.label)}</span>
+            <strong>${escapeHTML(item.value)}</strong>
+          </article>
+        `).join('')}
+      </div>
+      <div class="relation-hero">
+        <div>
+          <div class="detail-subtitle">${relationLabel}分析视角</div>
+          <strong>${relation === 'target' ? '谁在持续命中这个目标' : '这个攻击源打到了哪些目标'}</strong>
+          <div class="cell-sub">${escapeHTML(graph.description)}</div>
+        </div>
+        <div class="detail-actions">
+          <button class="ghost" type="button" data-relation-node-filter="${relation === 'target' ? 'target' : 'source'}" data-node-value="${escapeHTML(graph.center.value)}">
+            在告警中心按${relation === 'target' ? '目标' : '源'}联查
+          </button>
+        </div>
+      </div>
+      ${renderRelationGraph(graph)}
+    </div>
+  `;
+}
+
+function buildAlertRelationGraph(detail, relation) {
+  const timeline = relation === 'target' ? (detail.same_target_timeline || []) : (detail.same_source_timeline || []);
+  const centerValue = relation === 'target' ? (detail.alert.dst_ip || '未知目标') : (detail.alert.src_ip || '未知源地址');
+  const centerDesc = relation === 'target'
+    ? `目标资产 ${detail.alert.target_asset_name || detail.alert.dst_ip || '-'}`
+    : `攻击源 ${detail.alert.src_ip || '-'}`;
+  const nodeMap = new Map();
+  const probeSet = new Set();
+  const assetSet = new Set();
+  const resultStats = { success: 0, failed: 0, attempted: 0, unknown: 0 };
+  for (const item of timeline) {
+    const nodeValue = relation === 'target' ? (item.src_ip || '未知源地址') : (item.dst_ip || '未知目标');
+    const existing = nodeMap.get(nodeValue) || {
+      value: nodeValue,
+      count: 0,
+      probes: new Set(),
+      results: { success: 0, failed: 0, attempted: 0, unknown: 0 },
+      latestAt: '',
+    };
+    existing.count += 1;
+    if (item.probe_id) {
+      existing.probes.add(item.probe_id);
+      probeSet.add(item.probe_id);
+    }
+    const result = String(item.attack_result || 'unknown').toLowerCase();
+    if (existing.results[result] !== undefined) {
+      existing.results[result] += 1;
+    } else {
+      existing.results.unknown += 1;
+    }
+    if (resultStats[result] !== undefined) {
+      resultStats[result] += 1;
+    } else {
+      resultStats.unknown += 1;
+    }
+    if (nodeValue) {
+      assetSet.add(nodeValue);
+    }
+    if (!existing.latestAt || new Date(item.timestamp).getTime() > new Date(existing.latestAt).getTime()) {
+      existing.latestAt = item.timestamp;
+    }
+    nodeMap.set(nodeValue, existing);
+  }
+  const sortedNodes = Array.from(nodeMap.values())
+    .sort((left, right) => right.count - left.count || new Date(right.latestAt).getTime() - new Date(left.latestAt).getTime());
+  const nodes = sortedNodes
+    .slice(0, 10)
+    .map((item) => ({
+      value: item.value,
+      count: item.count,
+      probeCount: item.probes.size,
+      latestAt: item.latestAt,
+      dominantResult: dominantAttackResult(item.results),
+      success: item.results.success,
+      failed: item.results.failed,
+      attempted: item.results.attempted,
+      unknown: item.results.unknown,
+    }));
+  const overflow = Math.max(0, nodeMap.size - nodes.length);
+  if (overflow > 0) {
+    nodes.push({
+      value: `其他 ${overflow} 个节点`,
+      count: sortedNodes.slice(10).reduce((sum, item) => sum + item.count, 0),
+      probeCount: 0,
+      latestAt: '',
+      dominantResult: 'unknown',
+      success: 0,
+      failed: 0,
+      attempted: 0,
+      unknown: 0,
+      aggregate: true,
+    });
+  }
+  return {
+    relation,
+    center: { value: centerValue, desc: centerDesc },
+    nodes,
+    description: relation === 'target'
+      ? `共 ${nodeMap.size} 个源地址在当前窗口内命中过目标 ${centerValue}。`
+      : `共 ${nodeMap.size} 个目标地址在当前窗口内被源地址 ${centerValue} 命中。`,
+    summary: [
+      { label: relation === 'target' ? '攻击源数' : '影响目标数', value: String(assetSet.size) },
+      { label: '涉及探针数', value: String(probeSet.size) },
+      { label: '成功 / 失败', value: `${resultStats.success} / ${resultStats.failed}` },
+      { label: '尝试 / 未知', value: `${resultStats.attempted} / ${resultStats.unknown}` },
+    ],
+  };
+}
+
+function renderRelationGraph(graph) {
+  if (!graph.nodes.length) {
+    return '<div class="detail-empty">当前没有足够的同源/同目标事件，暂时无法生成关系图。</div>';
+  }
+  const stageWidth = 960;
+  const stageHeight = 520;
+  const centerX = stageWidth / 2;
+  const centerY = stageHeight / 2;
+  const radiusX = 340;
+  const radiusY = 175;
+  const outer = graph.nodes.map((node, index) => {
+    const angle = ((Math.PI * 2) / graph.nodes.length) * index - Math.PI / 2;
+    const x = centerX + Math.cos(angle) * radiusX;
+    const y = centerY + Math.sin(angle) * radiusY;
+    return { ...node, x, y };
+  });
+  return `
+    <div class="relation-graph-shell">
+      <div class="relation-graph-stage" style="--graph-width:${stageWidth}px; --graph-height:${stageHeight}px;">
+        <svg class="relation-graph-lines" viewBox="0 0 ${stageWidth} ${stageHeight}" aria-hidden="true">
+          ${outer.map((node) => `
+            <line x1="${centerX}" y1="${centerY}" x2="${node.x}" y2="${node.y}" class="relation-edge"></line>
+            <text x="${(centerX + node.x) / 2}" y="${(centerY + node.y) / 2 - 8}" class="relation-edge-label">${node.count} 次</text>
+          `).join('')}
+        </svg>
+        <div class="relation-node relation-node-center" style="left:${centerX}px; top:${centerY}px;">
+          <span class="tag subtle">${graph.relation === 'target' ? '目标中心' : '源中心'}</span>
+          <strong>${escapeHTML(graph.center.value)}</strong>
+          <span>${escapeHTML(graph.center.desc)}</span>
+        </div>
+        ${outer.map((node) => `
+          <button
+            type="button"
+            class="relation-node relation-node-outer ${node.aggregate ? 'relation-node-aggregate' : ''}"
+            style="left:${node.x}px; top:${node.y}px;"
+            ${node.aggregate ? 'disabled' : `data-relation-node-filter="${graph.relation === 'target' ? 'source' : 'target'}" data-node-value="${escapeHTML(node.value)}"`}
+          >
+            <span class="status-pill ${formatAttackResultClass(node.dominantResult)}">${formatAttackResult(node.dominantResult)}</span>
+            <strong>${escapeHTML(node.value)}</strong>
+            <span>${node.count} 次命中 · ${node.probeCount || 0} 个探针</span>
+            ${node.aggregate ? '' : `<span>成功 ${node.success} / 失败 ${node.failed} / 尝试 ${node.attempted}</span>`}
+          </button>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function renderBurpExchange(exchange, basis) {
+  if (!exchange) {
+    return `
+      <div class="burp-grid">
+        <div class="burp-panel">
+          <div class="burp-panel-head">
+            <strong>请求包</strong>
+            <span>当前协议没有可展示的可读请求数据</span>
+          </div>
+          <pre class="burp-raw">暂无可读请求包</pre>
+        </div>
+        <div class="burp-panel">
+          <div class="burp-panel-head">
+            <strong>响应包</strong>
+            <span>当前协议没有可展示的可读响应数据</span>
+          </div>
+          <pre class="burp-raw">${escapeHTML(basis?.response_snippet || '暂无可读响应包')}</pre>
+        </div>
+      </div>
+    `;
+  }
+  return `
+    <div class="burp-grid">
+      <div class="burp-panel">
+        <div class="burp-panel-head">
+          <strong>请求包</strong>
+          <span>${escapeHTML(exchange.requestMeta || '按可读 HTTP 上下文整理')}</span>
+        </div>
+        <pre class="burp-raw">${escapeHTML(exchange.requestRaw || '暂无可读请求包')}</pre>
+      </div>
+      <div class="burp-panel">
+        <div class="burp-panel-head">
+          <strong>响应包</strong>
+          <span>${escapeHTML(exchange.responseMeta || '按响应状态和响应体整理')}</span>
+        </div>
+        <pre class="burp-raw">${escapeHTML(exchange.responseRaw || basis?.response_snippet || '暂无可读响应包')}</pre>
+      </div>
+    </div>
+  `;
+}
+
+function extractPrimaryHTTPExchange(detail) {
+  const merged = mergeInvestigationEvents(detail);
+  let best = null;
+  let bestScore = -1;
+  for (const event of merged) {
+    const payload = event?.payload?.payload || event?.payload || {};
+    const context = extractHTTPContext(payload);
+    if (!context) continue;
+    let score = 0;
+    if (context.requestRaw) score += 4;
+    if (context.responseRaw) score += 4;
+    if (context.status) score += 2;
+    if (context.requestBody) score += 1;
+    if (context.responseBody) score += 1;
+    if (String(payload.event_type || '').toLowerCase() === 'http') score += 2;
+    if (score > bestScore) {
+      best = {
+        ...context,
+        requestMeta: context.method && context.url ? `${context.method} ${context.url}` : '按可读 HTTP 请求整理',
+        responseMeta: context.status ? `HTTP ${context.status}` : '按响应状态和响应体整理',
+      };
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+function renderRelationEntryCard(detail, relation) {
+  const isSource = relation === 'source';
+  const stats = summarizeTimeline(isSource ? (detail.same_source_timeline || []) : (detail.same_target_timeline || []), relation);
+  const title = isSource ? '同源关系图' : '同目标关系图';
+  const desc = isSource
+    ? `围绕源地址 ${detail.alert.src_ip || '-'} 查看其在当前攻击窗口内打到哪些目标。`
+    : `围绕目标地址 ${detail.alert.dst_ip || '-'} 查看当前目标被哪些源地址命中。`;
+  return `
+    <button class="relation-entry-card" type="button" data-alert-relation="${relation}">
+      <div class="relation-entry-head">
+        <strong>${title}</strong>
+        <span class="tag subtle">${isSource ? '以攻击源为中心' : '以目标资产为中心'}</span>
+      </div>
+      <p>${escapeHTML(desc)}</p>
+      <div class="relation-entry-stats">
+        ${stats.map((item) => `
+          <div class="relation-mini-stat">
+            <span>${escapeHTML(item.label)}</span>
+            <strong>${escapeHTML(item.value)}</strong>
+          </div>
+        `).join('')}
+      </div>
+      <span class="relation-entry-link">点击查看动态关系图</span>
+    </button>
+  `;
+}
+
+function dominantAttackResult(results) {
+  const order = ['success', 'failed', 'attempted', 'unknown'];
+  let best = 'unknown';
+  let bestValue = -1;
+  for (const key of order) {
+    const value = Number(results?.[key] || 0);
+    if (value > bestValue) {
+      best = key;
+      bestValue = value;
+    }
+  }
+  return best;
 }
 
 function renderTimelinePanel(items, relation) {
@@ -2319,17 +2644,46 @@ function extractHTTPContext(payload) {
     ),
   );
   const responseBodyRaw = decodeBodyField(firstNonEmpty(payload.http_response_body, http.http_response_body, payload.response_body));
-  const requestText = firstReadableHTTPText(
+  const requestText = firstReadableHTTPRequestText(
+    payload.payload_printable,
+    payload.payload,
+  );
+  const responseText = firstReadableHTTPResponseText(
     payload.payload_printable,
     payload.payload,
   );
   const requestParsed = parseHTTPRequest(requestText);
-  const requestHeaders = filterUsefulHeaders(requestParsed.headers || []);
-  const requestBody = summarizeText(selectUsefulBody(requestBodyRaw || requestParsed.body, contentType), 1200);
-  const responseBody = summarizeText(selectUsefulBody(responseBodyRaw, contentType), 1200);
-  if (!method && !url && !host && !userAgent && !contentType && !status && !requestBody && !responseBody && !requestHeaders.length) {
+  const requestHeadersAll = requestParsed.headers || [];
+  const requestHeaders = filterUsefulHeaders(requestHeadersAll);
+  const requestBodyDetailed = truncateAnalysisText(selectDetailedBody(requestBodyRaw || requestParsed.body, contentType), 12000);
+  const responseBodyDetailed = truncateAnalysisText(selectDetailedBody(responseBodyRaw, contentType), 12000);
+  const responseHeaders = buildResponseHeaders(contentType, responseBodyDetailed);
+  const requestBody = summarizeText(requestBodyDetailed, 1200);
+  const responseBody = summarizeText(responseBodyDetailed, 1200);
+  if (!method && !url && !host && !userAgent && !contentType && !status && !requestBody && !responseBody && !requestHeaders.length && !requestText && !responseText) {
     return null;
   }
+  const requestRaw = truncateAnalysisText(
+    requestText || buildHTTPRequestRaw({
+      method,
+      url,
+      host,
+      headers: requestHeadersAll,
+      contentType,
+      userAgent,
+      body: requestBodyDetailed,
+    }),
+    16000,
+  );
+  const responseRaw = truncateAnalysisText(
+    responseText || buildHTTPResponseRaw({
+      status,
+      contentType,
+      headers: responseHeaders,
+      body: responseBodyDetailed,
+    }),
+    16000,
+  );
   return {
     method,
     url,
@@ -2338,9 +2692,11 @@ function extractHTTPContext(payload) {
     contentType,
     status,
     requestHeaders,
-    responseHeaders: [],
+    responseHeaders,
     requestBody,
     responseBody,
+    requestRaw,
+    responseRaw,
   };
 }
 
@@ -2510,7 +2866,7 @@ function renderFileContext(context) {
   `;
 }
 
-function firstReadableHTTPText(...values) {
+function firstReadableHTTPRequestText(...values) {
   for (const value of values) {
     const decoded = decodeBodyField(value);
     if (!decoded) continue;
@@ -2521,9 +2877,25 @@ function firstReadableHTTPText(...values) {
   return '';
 }
 
+function firstReadableHTTPResponseText(...values) {
+  for (const value of values) {
+    const decoded = decodeBodyField(value);
+    if (!decoded) continue;
+    if (looksLikeHTTPResponse(decoded)) {
+      return decoded;
+    }
+  }
+  return '';
+}
+
 function looksLikeHTTPRequest(value) {
   const text = String(value || '');
   return /^(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+\S+\s+HTTP\/\d/i.test(text.trim());
+}
+
+function looksLikeHTTPResponse(value) {
+  const text = String(value || '');
+  return /^HTTP\/\d(?:\.\d)?\s+\d{3}/i.test(text.trim());
 }
 
 function parseHTTPRequest(value) {
@@ -2548,6 +2920,19 @@ function parseHTTPRequest(value) {
 function filterUsefulHeaders(headers) {
   const allow = new Set(['host', 'user-agent', 'content-type', 'content-length', 'referer', 'x-forwarded-for', 'accept']);
   return (headers || []).filter((item) => allow.has(String(item.name || '').toLowerCase()));
+}
+
+function selectDetailedBody(value, contentType) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const type = String(contentType || '').toLowerCase();
+  if (type.includes('json') || type.includes('xml') || type.includes('x-www-form-urlencoded') || type.includes('text') || looksStructuredContent(text)) {
+    return text;
+  }
+  if (isReadableAnalysisText(text)) {
+    return text;
+  }
+  return '';
 }
 
 function selectUsefulBody(value, contentType) {
@@ -2618,6 +3003,62 @@ function decodeBodyField(value) {
   } catch (_) {
   }
   return trimmed;
+}
+
+function truncateAnalysisText(value, maxLength) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength)}\n\n... 已截断，避免页面加载过慢 ...`;
+}
+
+function buildHTTPRequestRaw({ method, url, host, headers, contentType, userAgent, body }) {
+  if (!method && !url && !host && !body) {
+    return '';
+  }
+  const mergedHeaders = dedupeHeaders([
+    ...(headers || []),
+    host ? { name: 'Host', value: host } : null,
+    userAgent ? { name: 'User-Agent', value: userAgent } : null,
+    contentType ? { name: 'Content-Type', value: contentType } : null,
+  ]);
+  const startLine = `${method || 'GET'} ${url || '/'} HTTP/1.1`;
+  const headerLines = mergedHeaders.map((item) => `${item.name}: ${item.value}`);
+  return [startLine, ...headerLines, '', body || ''].join('\n').trim();
+}
+
+function buildHTTPResponseRaw({ status, contentType, headers, body }) {
+  if (!status && !body) {
+    return '';
+  }
+  const mergedHeaders = dedupeHeaders([
+    ...(headers || []),
+    contentType ? { name: 'Content-Type', value: contentType } : null,
+    body ? { name: 'Content-Length', value: String(body.length) } : null,
+  ]);
+  const startLine = `HTTP/1.1 ${status || '200'}`;
+  const headerLines = mergedHeaders.map((item) => `${item.name}: ${item.value}`);
+  return [startLine, ...headerLines, '', body || ''].join('\n').trim();
+}
+
+function buildResponseHeaders(contentType, body) {
+  const headers = [];
+  if (contentType) {
+    headers.push({ name: 'Content-Type', value: contentType });
+  }
+  if (body) {
+    headers.push({ name: 'Content-Length', value: String(body.length) });
+  }
+  return headers;
+}
+
+function dedupeHeaders(headers) {
+  const map = new Map();
+  for (const item of headers || []) {
+    if (!item?.name || !item?.value) continue;
+    map.set(String(item.name).toLowerCase(), { name: item.name, value: item.value });
+  }
+  return Array.from(map.values());
 }
 
 function firstNonEmpty(...values) {

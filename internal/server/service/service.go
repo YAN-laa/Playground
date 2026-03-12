@@ -386,6 +386,7 @@ func (s *Service) GetAlertDetail(ctx context.Context, id string) (shared.AlertDe
 		return shared.AlertDetail{}, false, err
 	}
 	decisionBasis := buildAlertDecisionBasis(alert, events, contextEvents)
+	alert.AttackResult = decisionBasis.AttackResult
 	return shared.AlertDetail{
 		Alert:               alert,
 		Events:              events,
@@ -3105,7 +3106,7 @@ func (s *Service) findSimilarAlerts(ctx context.Context, alert shared.Alert, mod
 }
 
 func buildAlertDecisionBasis(alert shared.Alert, events []shared.RawEvent, contextEvents []shared.RawEvent) shared.AlertDecisionBasis {
-	reason, snippet := inferAttackResultReason(events, contextEvents, alert.AttackResult)
+	attackResult, reason, snippet := inferAttackResultReason(events, contextEvents, alert.AttackResult)
 	aggregation := []string{
 		fmt.Sprintf("按源地址 %s、目的地址 %s、端口 %d、协议 %s、规则 %d 聚合", alert.SrcIP, alert.DstIP, alert.DstPort, alert.Proto, alert.SignatureID),
 		fmt.Sprintf("当前聚合窗口 %d 分钟，累计命中 %d 次", maxInt(alert.WindowMinutes, 1), alert.EventCount),
@@ -3122,7 +3123,7 @@ func buildAlertDecisionBasis(alert shared.Alert, events []shared.RawEvent, conte
 	}
 	risk = append(risk, fmt.Sprintf("当前风险分 %d", alert.RiskScore))
 	return shared.AlertDecisionBasis{
-		AttackResult:       alert.AttackResult,
+		AttackResult:       attackResult,
 		AttackResultReason: reason,
 		ResponseSnippet:    snippet,
 		AggregationReason:  aggregation,
@@ -3130,39 +3131,57 @@ func buildAlertDecisionBasis(alert shared.Alert, events []shared.RawEvent, conte
 	}
 }
 
-func inferAttackResultReason(events []shared.RawEvent, contextEvents []shared.RawEvent, attackResult string) (string, string) {
+func inferAttackResultReason(events []shared.RawEvent, contextEvents []shared.RawEvent, attackResult string) (string, string, string) {
 	all := append([]shared.RawEvent{}, contextEvents...)
 	all = append(all, events...)
-	statuses := make([]int, 0)
-	responseSnippets := make([]string, 0)
+	successStatus := 0
+	successSnippet := ""
+	failedStatus := 0
+	failedSnippet := ""
+	attemptedStatus := 0
+	attemptedSnippet := ""
 	for _, event := range all {
 		status := extractHTTPStatus(event.Payload)
-		if status != 0 {
-			statuses = append(statuses, status)
-			responseSnippets = append(responseSnippets, responseSnippet(event.Payload, status))
+		if status == 0 {
+			continue
+		}
+		snippet := responseSnippet(event.Payload, status)
+		switch {
+		case status >= 200 && status < 300:
+			if successStatus == 0 {
+				successStatus = status
+				successSnippet = snippet
+			}
+		case status >= 300 && status < 400:
+			if attemptedStatus == 0 {
+				attemptedStatus = status
+				attemptedSnippet = snippet
+			}
+		case status >= 400:
+			if failedStatus == 0 {
+				failedStatus = status
+				failedSnippet = snippet
+			}
 		}
 	}
-	sort.Ints(statuses)
-	if len(statuses) > 0 {
-		last := statuses[len(statuses)-1]
-		snippet := responseSnippets[len(responseSnippets)-1]
-		switch {
-		case last >= 200 && last < 300:
-			return fmt.Sprintf("依据 HTTP 响应状态码 %d 判定为攻击成功", last), snippet
-		case last >= 300 && last < 400:
-			return fmt.Sprintf("依据 HTTP 重定向状态码 %d 判定为攻击尝试", last), snippet
-		case last >= 400:
-			return fmt.Sprintf("依据 HTTP 响应状态码 %d 判定为攻击失败", last), snippet
-		}
+	switch {
+	case successStatus != 0:
+		return "success", fmt.Sprintf("依据 HTTP 响应状态码 %d 判定为攻击成功", successStatus), successSnippet
+	case failedStatus != 0:
+		return "failed", fmt.Sprintf("依据 HTTP 响应状态码 %d 判定为攻击失败", failedStatus), failedSnippet
+	case attemptedStatus != 0:
+		return "attempted", fmt.Sprintf("依据 HTTP 重定向状态码 %d 判定为攻击尝试", attemptedStatus), attemptedSnippet
 	}
 	for _, event := range all {
 		method := extractHTTPMethod(event.Payload)
 		url := extractHTTPURL(event.Payload)
 		if method != "" || url != "" {
-			return fmt.Sprintf("观察到请求 %s %s，但缺少可靠成功响应，判定为%s", blankAs(method, "HTTP"), blankAs(url, "目标资源"), formatAttackResultText(attackResult)), ""
+			derived := strongerAttackResult(attackResult, "attempted")
+			return derived, fmt.Sprintf("观察到请求 %s %s，但缺少可靠成功响应，判定为%s", blankAs(method, "HTTP"), blankAs(url, "目标资源"), formatAttackResultText(derived)), ""
 		}
 	}
-	return fmt.Sprintf("缺少可用于判定的响应包，当前结果为%s", formatAttackResultText(attackResult)), ""
+	normalized := normalizeAttackResult(attackResult)
+	return normalized, fmt.Sprintf("缺少可用于判定的响应包，当前结果为%s", formatAttackResultText(normalized)), ""
 }
 
 func buildRelatedAlertTimeline(relation string, current shared.Alert, alerts []shared.Alert, rawEvents []shared.RawEvent) []shared.AlertTimelineItem {
@@ -3560,6 +3579,20 @@ func mergeAttackResult(current, next string) string {
 		return next
 	}
 	return current
+}
+
+func strongerAttackResult(current, next string) string {
+	return mergeAttackResult(current, next)
+}
+
+func normalizeAttackResult(value string) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	switch normalized {
+	case "success", "failed", "attempted":
+		return normalized
+	default:
+		return "unknown"
+	}
 }
 
 func topTrend(values map[string]int, limit int) []shared.TrendPoint {

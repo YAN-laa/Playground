@@ -601,6 +601,102 @@ func TestAlertAttackResultDerivedFromHTTPResponse(t *testing.T) {
 	}
 }
 
+func TestAlertDetailAttackResultUsesHTTPContextEvidence(t *testing.T) {
+	t.Setenv("APP_EXPORT_DIR", t.TempDir())
+	handler, cleanup, err := NewHandler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	var login shared.LoginResponse
+	doJSON(t, handler, "/api/v1/auth/login", http.MethodPost, shared.LoginRequest{
+		TenantID: "demo-tenant",
+		Username: "admin",
+		Password: "admin123",
+	}, &login, http.StatusOK, "")
+	authHeader := "Bearer " + login.Token
+
+	var probe shared.Probe
+	doJSON(t, handler, "/api/v1/probes/register", http.MethodPost, shared.RegisterProbeRequest{
+		TenantID:    "tenant-http-detail",
+		ProbeCode:   "probe-http-detail-01",
+		Name:        "HTTP Detail Probe",
+		Version:     "0.1.0",
+		RuleVersion: "rules-v1",
+	}, &probe, http.StatusCreated, "")
+
+	now := time.Now().UTC()
+	doJSON(t, handler, "/api/v1/events/ingest", http.MethodPost, shared.EventBatch{
+		TenantID: "tenant-http-detail",
+		ProbeID:  probe.ID,
+		Events: []shared.SuricataEvent{
+			{
+				Timestamp: now.Format(time.RFC3339),
+				EventType: "alert",
+				SrcIP:     "192.168.2.186",
+				SrcPort:   56077,
+				DstIP:     "192.168.2.88",
+				DstPort:   80,
+				Proto:     "TCP",
+				AppProto:  "http",
+				FlowID:    "flow-http-detail-01",
+				Alert: &shared.SuricataAlert{
+					SignatureID: 2063343,
+					Signature:   "ET EXPLOIT Apache CouchDB",
+					Category:    "Attempted Administrator Privilege Gain",
+					Severity:    1,
+				},
+				Payload: map[string]any{
+					"app_proto": "http",
+				},
+			},
+			{
+				Timestamp: now.Add(500 * time.Millisecond).Format(time.RFC3339),
+				EventType: "http",
+				SrcIP:     "192.168.2.186",
+				SrcPort:   56077,
+				DstIP:     "192.168.2.88",
+				DstPort:   80,
+				Proto:     "TCP",
+				AppProto:  "http",
+				FlowID:    "flow-http-detail-01",
+				Payload: map[string]any{
+					"app_proto": "http",
+					"http": map[string]any{
+						"http_method":        "PUT",
+						"hostname":           "192.168.2.88",
+						"url":                "/_users/test",
+						"status":             202,
+						"http_response_body": base64.StdEncoding.EncodeToString([]byte(`{"ok":true}`)),
+					},
+				},
+			},
+		},
+	}, nil, http.StatusAccepted, "")
+
+	var alerts shared.AlertListResponse
+	doJSON(t, handler, "/api/v1/alerts?tenant_id=tenant-http-detail", http.MethodGet, nil, &alerts, http.StatusOK, authHeader)
+	if len(alerts.Items) != 1 {
+		t.Fatalf("expected 1 aggregated alert, got %d", len(alerts.Items))
+	}
+	if alerts.Items[0].AttackResult != "unknown" {
+		t.Fatalf("expected stored aggregate attack result to remain unknown before detail reconciliation, got %s", alerts.Items[0].AttackResult)
+	}
+
+	var detail shared.AlertDetail
+	doJSON(t, handler, "/api/v1/alerts/"+alerts.Items[0].ID+"/detail", http.MethodGet, nil, &detail, http.StatusOK, authHeader)
+	if detail.Alert.AttackResult != "success" {
+		t.Fatalf("expected detail attack result=success, got %s", detail.Alert.AttackResult)
+	}
+	if detail.DecisionBasis.AttackResult != "success" {
+		t.Fatalf("expected decision basis attack result=success, got %s", detail.DecisionBasis.AttackResult)
+	}
+	if !strings.Contains(detail.DecisionBasis.AttackResultReason, "202") {
+		t.Fatalf("expected attack result reason to reference HTTP 202, got %s", detail.DecisionBasis.AttackResultReason)
+	}
+}
+
 func TestAlertAggregationWindowAndCrossProbe(t *testing.T) {
 	t.Setenv("APP_EXPORT_DIR", t.TempDir())
 	t.Setenv("APP_ALERT_AGG_WINDOW", "1m")
