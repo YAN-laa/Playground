@@ -670,25 +670,10 @@ func (s *MemoryStore) ListAlerts(_ context.Context, query shared.AlertQuery) ([]
 		if query.TenantID != "" && alert.TenantID != query.TenantID {
 			continue
 		}
-		if query.Status != "" && alert.Status != query.Status {
-			continue
-		}
 		if !query.Since.IsZero() && alert.LastSeenAt.Before(query.Since) {
 			continue
 		}
-		if query.SrcIP != "" && alert.SrcIP != query.SrcIP {
-			continue
-		}
-		if query.DstIP != "" && alert.DstIP != query.DstIP {
-			continue
-		}
-		if query.Signature != "" && !strings.Contains(strings.ToLower(alert.Signature), strings.ToLower(query.Signature)) {
-			continue
-		}
-		if query.Severity != 0 && alert.Severity != query.Severity {
-			continue
-		}
-		if query.Assignee != "" && alert.Assignee != query.Assignee {
+		if !matchAlertQuery(alert, query) {
 			continue
 		}
 		out = append(out, alert)
@@ -697,6 +682,73 @@ func (s *MemoryStore) ListAlerts(_ context.Context, query shared.AlertQuery) ([]
 		return out[i].LastSeenAt.After(out[j].LastSeenAt)
 	})
 	return out, nil
+}
+
+func matchAlertQuery(alert shared.Alert, query shared.AlertQuery) bool {
+	conditions := make([]bool, 0, 10)
+	if query.Status != "" {
+		conditions = append(conditions, alert.Status == query.Status)
+	}
+	if query.SrcIP != "" {
+		conditions = append(conditions, alert.SrcIP == query.SrcIP)
+	}
+	if query.DstIP != "" {
+		conditions = append(conditions, alert.DstIP == query.DstIP)
+	}
+	if query.Signature != "" {
+		conditions = append(conditions, strings.Contains(strings.ToLower(alert.Signature), strings.ToLower(query.Signature)))
+	}
+	if query.Category != "" {
+		conditions = append(conditions, strings.Contains(strings.ToLower(alert.Category), strings.ToLower(query.Category)))
+	}
+	if query.Probe != "" {
+		matched := false
+		for _, probeID := range alert.ProbeIDs {
+			if strings.Contains(strings.ToLower(probeID), strings.ToLower(query.Probe)) {
+				matched = true
+				break
+			}
+		}
+		conditions = append(conditions, matched)
+	}
+	if query.Severity != 0 {
+		conditions = append(conditions, alert.Severity == query.Severity)
+	}
+	if query.Assignee != "" {
+		conditions = append(conditions, alert.Assignee == query.Assignee)
+	}
+	if query.AttackResult != "" {
+		conditions = append(conditions, alert.AttackResult == query.AttackResult)
+	}
+	if query.MinProbeCount > 0 {
+		conditions = append(conditions, alert.ProbeCount >= query.MinProbeCount)
+	}
+	if query.MaxProbeCount > 0 {
+		conditions = append(conditions, alert.ProbeCount <= query.MaxProbeCount)
+	}
+	if query.MinWindowMins > 0 {
+		conditions = append(conditions, alert.WindowMinutes >= query.MinWindowMins)
+	}
+	if query.MaxWindowMins > 0 {
+		conditions = append(conditions, alert.WindowMinutes <= query.MaxWindowMins)
+	}
+	if len(conditions) == 0 {
+		return true
+	}
+	if strings.EqualFold(query.MatchMode, "any") {
+		for _, matched := range conditions {
+			if matched {
+				return true
+			}
+		}
+		return false
+	}
+	for _, matched := range conditions {
+		if !matched {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *MemoryStore) CreateTicket(_ context.Context, ticket shared.Ticket) (shared.Ticket, error) {

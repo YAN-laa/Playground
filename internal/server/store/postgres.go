@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -1236,40 +1237,83 @@ func (s *PostgresStore) ListAlerts(ctx context.Context, query shared.AlertQuery)
 		args = append(args, query.TenantID)
 		idx++
 	}
-	if query.Status != "" {
-		sql += fmt.Sprintf(" and status=$%d", idx)
-		args = append(args, query.Status)
-		idx++
-	}
 	if !query.Since.IsZero() {
 		sql += fmt.Sprintf(" and last_seen_at >= $%d", idx)
 		args = append(args, query.Since)
 		idx++
 	}
+	predicates := make([]string, 0, 12)
+	if query.Status != "" {
+		predicates = append(predicates, fmt.Sprintf("status=$%d", idx))
+		args = append(args, query.Status)
+		idx++
+	}
 	if query.SrcIP != "" {
-		sql += fmt.Sprintf(" and src_ip=$%d", idx)
+		predicates = append(predicates, fmt.Sprintf("src_ip=$%d", idx))
 		args = append(args, query.SrcIP)
 		idx++
 	}
 	if query.DstIP != "" {
-		sql += fmt.Sprintf(" and dst_ip=$%d", idx)
+		predicates = append(predicates, fmt.Sprintf("dst_ip=$%d", idx))
 		args = append(args, query.DstIP)
 		idx++
 	}
 	if query.Signature != "" {
-		sql += fmt.Sprintf(" and lower(signature) like lower($%d)", idx)
+		predicates = append(predicates, fmt.Sprintf("lower(signature) like lower($%d)", idx))
 		args = append(args, "%"+query.Signature+"%")
 		idx++
 	}
+	if query.Category != "" {
+		predicates = append(predicates, fmt.Sprintf("lower(category) like lower($%d)", idx))
+		args = append(args, "%"+query.Category+"%")
+		idx++
+	}
+	if query.Probe != "" {
+		predicates = append(predicates, fmt.Sprintf("array_to_string(probe_ids, ',') ilike $%d", idx))
+		args = append(args, "%"+query.Probe+"%")
+		idx++
+	}
 	if query.Severity != 0 {
-		sql += fmt.Sprintf(" and severity=$%d", idx)
+		predicates = append(predicates, fmt.Sprintf("severity=$%d", idx))
 		args = append(args, query.Severity)
 		idx++
 	}
 	if query.Assignee != "" {
-		sql += fmt.Sprintf(" and assignee=$%d", idx)
+		predicates = append(predicates, fmt.Sprintf("assignee=$%d", idx))
 		args = append(args, query.Assignee)
 		idx++
+	}
+	if query.AttackResult != "" {
+		predicates = append(predicates, fmt.Sprintf("attack_result=$%d", idx))
+		args = append(args, query.AttackResult)
+		idx++
+	}
+	if query.MinProbeCount > 0 {
+		predicates = append(predicates, fmt.Sprintf("probe_count >= $%d", idx))
+		args = append(args, query.MinProbeCount)
+		idx++
+	}
+	if query.MaxProbeCount > 0 {
+		predicates = append(predicates, fmt.Sprintf("probe_count <= $%d", idx))
+		args = append(args, query.MaxProbeCount)
+		idx++
+	}
+	if query.MinWindowMins > 0 {
+		predicates = append(predicates, fmt.Sprintf("window_minutes >= $%d", idx))
+		args = append(args, query.MinWindowMins)
+		idx++
+	}
+	if query.MaxWindowMins > 0 {
+		predicates = append(predicates, fmt.Sprintf("window_minutes <= $%d", idx))
+		args = append(args, query.MaxWindowMins)
+		idx++
+	}
+	if len(predicates) > 0 {
+		joiner := " and "
+		if strings.EqualFold(query.MatchMode, "any") {
+			joiner = " or "
+		}
+		sql += " and (" + strings.Join(predicates, joiner) + ")"
 	}
 	sql += ` order by last_seen_at desc`
 	rows, err := s.pool.Query(ctx, sql, args...)

@@ -671,10 +671,13 @@ func (r *Router) handleListAlerts(w http.ResponseWriter, req *http.Request) {
 	}
 	query := shared.AlertQuery{
 		TenantID:  tenantID,
+		MatchMode: req.URL.Query().Get("match_mode"),
 		Status:    req.URL.Query().Get("status"),
 		SrcIP:     req.URL.Query().Get("src_ip"),
 		DstIP:     req.URL.Query().Get("dst_ip"),
 		Signature: req.URL.Query().Get("signature"),
+		Category:  req.URL.Query().Get("category"),
+		Probe:     req.URL.Query().Get("probe"),
 		Assignee:  req.URL.Query().Get("assignee"),
 		SortBy:    req.URL.Query().Get("sort_by"),
 		SortOrder: req.URL.Query().Get("sort_order"),

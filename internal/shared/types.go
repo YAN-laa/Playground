@@ -471,11 +471,14 @@ type AlertTimelineItem struct {
 
 type AlertQuery struct {
 	TenantID        string    `json:"tenant_id"`
+	MatchMode       string    `json:"match_mode"`
 	Status          string    `json:"status"`
 	Since           time.Time `json:"since"`
 	SrcIP           string    `json:"src_ip"`
 	DstIP           string    `json:"dst_ip"`
 	Signature       string    `json:"signature"`
+	Category        string    `json:"category"`
+	Probe           string    `json:"probe"`
 	Severity        int       `json:"severity"`
 	Assignee        string    `json:"assignee"`
 	AttackResult    string    `json:"attack_result"`

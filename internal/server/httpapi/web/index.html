@@ -64,8 +64,61 @@
           <section id="page-alerts" class="page hidden">
             <div class="card page-card">
               <div class="panel-head"><h2>告警中心</h2><span>按时间、源目地址、名称和等级快速筛选</span></div>
+              <div class="alert-query-bar">
+                <div class="alert-query-bar-main">
+                  <select id="alert-view-mode">
+                    <option value="simple">简易模式</option>
+                  </select>
+                  <select id="alert-condition-logic">
+                    <option value="all">且</option>
+                    <option value="any">或</option>
+                  </select>
+                  <div class="alert-condition-builder">
+                    <select id="alert-condition-field">
+                      <option value="src">源 IP</option>
+                      <option value="dst">目的 IP</option>
+                      <option value="signature">告警名称</option>
+                      <option value="assignee">处理人</option>
+                      <option value="severity">告警等级</option>
+                      <option value="status">状态</option>
+                      <option value="attack_result">攻击结果</option>
+                      <option value="category">攻击类型</option>
+                      <option value="probe">探针</option>
+                      <option value="min_probe_count">跨探针数</option>
+                      <option value="min_window_mins">聚合窗口</option>
+                      <option value="since">开始时间</option>
+                    </select>
+                    <div id="alert-condition-input-wrap" class="alert-condition-input-wrap"></div>
+                    <button id="alert-condition-add-btn" class="ghost" type="button">添加条件</button>
+                  </div>
+                  <div id="alert-filter-chips" class="alert-condition-list"></div>
+                </div>
+                <div class="alert-query-bar-actions">
+                  <button id="alert-condition-search-btn" type="button">搜索</button>
+                  <button id="alert-condition-reset-btn" class="ghost" type="button">清空</button>
+                </div>
+              </div>
+              <div class="alert-analysis-board">
+                <div class="alert-analysis-priority">
+                  <div class="panel-head panel-head-compact">
+                    <h3>智能定性分析</h3>
+                    <span>根据当前筛选结果自动计算</span>
+                  </div>
+                  <div class="alert-priority-body">
+                    <span class="muted">推荐关注优先级</span>
+                    <div class="alert-priority-meter">
+                      <div id="alert-priority-fill" class="alert-priority-fill"></div>
+                    </div>
+                    <div class="alert-priority-scale">
+                      <strong id="alert-priority-level">高</strong>
+                      <span>低</span>
+                    </div>
+                  </div>
+                </div>
+                <div id="alert-intent-cards" class="alert-intent-cards"></div>
+              </div>
               <div class="alert-toolbar">
-                <div class="filter-grid alert-filter-grid">
+                <div class="filter-grid alert-filter-grid hidden">
                   <input id="src-filter" placeholder="源 IP" />
                   <input id="dst-filter" placeholder="目的 IP" />
                   <input id="signature-filter" placeholder="告警名称 / 签名" />

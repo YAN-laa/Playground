@@ -58,15 +58,12 @@ func NewOpenSearchEngine(cfg OpenSearchConfig) *OpenSearchEngine {
 
 func (e *OpenSearchEngine) SearchAlerts(ctx context.Context, query shared.AlertQuery) (shared.AlertListResponse, error) {
 	page, pageSize := normalizePage(query.Page, query.PageSize)
+	alertQuery := buildAlertSearchQuery(query)
 	body := map[string]any{
 		"size": normalizeLimit(pageSize, 100),
 		"from": max((page-1)*normalizeLimit(pageSize, 100), 0),
 		"sort": []map[string]any{{defaultString(query.SortBy, "last_seen_at"): map[string]string{"order": defaultString(query.SortOrder, "desc")}}},
-		"query": map[string]any{
-			"bool": map[string]any{
-				"filter": buildAlertFilters(query),
-			},
-		},
+		"query": alertQuery,
 	}
 	var result struct {
 		Hits struct {
@@ -344,53 +341,12 @@ func (e *OpenSearchEngine) applyAuth(req *http.Request) {
 	}
 }
 
-func buildAlertFilters(query shared.AlertQuery) []map[string]any {
+func buildAlertSearchQuery(query shared.AlertQuery) map[string]any {
 	filters := []map[string]any{
 		{"term": map[string]any{"tenant_id.keyword": query.TenantID}},
 	}
-	if query.Status != "" {
-		filters = append(filters, map[string]any{"term": map[string]any{"status.keyword": query.Status}})
-	}
-	if query.SrcIP != "" {
-		filters = append(filters, map[string]any{"term": map[string]any{"src_ip.keyword": query.SrcIP}})
-	}
-	if query.DstIP != "" {
-		filters = append(filters, map[string]any{"term": map[string]any{"dst_ip.keyword": query.DstIP}})
-	}
-	if query.Signature != "" {
-		filters = append(filters, map[string]any{"match": map[string]any{"signature": query.Signature}})
-	}
-	if query.Assignee != "" {
-		filters = append(filters, map[string]any{"term": map[string]any{"assignee.keyword": query.Assignee}})
-	}
-	if query.Severity > 0 {
-		filters = append(filters, map[string]any{"term": map[string]any{"severity": query.Severity}})
-	}
-	if query.AttackResult != "" {
-		filters = append(filters, map[string]any{"term": map[string]any{"attack_result.keyword": query.AttackResult}})
-	}
 	if !query.Since.IsZero() {
 		filters = append(filters, map[string]any{"range": map[string]any{"last_seen_at": map[string]any{"gte": query.Since.Format(time.RFC3339)}}})
-	}
-	if query.MinProbeCount > 0 || query.MaxProbeCount > 0 {
-		rangeBody := map[string]any{}
-		if query.MinProbeCount > 0 {
-			rangeBody["gte"] = query.MinProbeCount
-		}
-		if query.MaxProbeCount > 0 {
-			rangeBody["lte"] = query.MaxProbeCount
-		}
-		filters = append(filters, map[string]any{"range": map[string]any{"probe_count": rangeBody}})
-	}
-	if query.MinWindowMins > 0 || query.MaxWindowMins > 0 {
-		rangeBody := map[string]any{}
-		if query.MinWindowMins > 0 {
-			rangeBody["gte"] = query.MinWindowMins
-		}
-		if query.MaxWindowMins > 0 {
-			rangeBody["lte"] = query.MaxWindowMins
-		}
-		filters = append(filters, map[string]any{"range": map[string]any{"window_minutes": rangeBody}})
 	}
 	if len(query.AllowedAssetIDs) > 0 {
 		should := make([]map[string]any, 0, len(query.AllowedAssetIDs)*2)
@@ -407,7 +363,72 @@ func buildAlertFilters(query shared.AlertQuery) []map[string]any {
 			},
 		})
 	}
-	return filters
+	conditions := buildAlertConditionClauses(query)
+	boolQuery := map[string]any{
+		"filter": filters,
+	}
+	if len(conditions) == 0 {
+		return map[string]any{"bool": boolQuery}
+	}
+	if strings.EqualFold(query.MatchMode, "any") {
+		boolQuery["should"] = conditions
+		boolQuery["minimum_should_match"] = 1
+		return map[string]any{"bool": boolQuery}
+	}
+	boolQuery["filter"] = append(filters, conditions...)
+	return map[string]any{"bool": boolQuery}
+}
+
+func buildAlertConditionClauses(query shared.AlertQuery) []map[string]any {
+	clauses := make([]map[string]any, 0, 12)
+	if query.Status != "" {
+		clauses = append(clauses, map[string]any{"term": map[string]any{"status.keyword": query.Status}})
+	}
+	if query.SrcIP != "" {
+		clauses = append(clauses, map[string]any{"term": map[string]any{"src_ip.keyword": query.SrcIP}})
+	}
+	if query.DstIP != "" {
+		clauses = append(clauses, map[string]any{"term": map[string]any{"dst_ip.keyword": query.DstIP}})
+	}
+	if query.Signature != "" {
+		clauses = append(clauses, map[string]any{"match": map[string]any{"signature": query.Signature}})
+	}
+	if query.Category != "" {
+		clauses = append(clauses, map[string]any{"match": map[string]any{"category": query.Category}})
+	}
+	if query.Probe != "" {
+		clauses = append(clauses, map[string]any{"wildcard": map[string]any{"probe_ids.keyword": fmt.Sprintf("*%s*", query.Probe)}})
+	}
+	if query.Assignee != "" {
+		clauses = append(clauses, map[string]any{"term": map[string]any{"assignee.keyword": query.Assignee}})
+	}
+	if query.Severity > 0 {
+		clauses = append(clauses, map[string]any{"term": map[string]any{"severity": query.Severity}})
+	}
+	if query.AttackResult != "" {
+		clauses = append(clauses, map[string]any{"term": map[string]any{"attack_result.keyword": query.AttackResult}})
+	}
+	if query.MinProbeCount > 0 || query.MaxProbeCount > 0 {
+		rangeBody := map[string]any{}
+		if query.MinProbeCount > 0 {
+			rangeBody["gte"] = query.MinProbeCount
+		}
+		if query.MaxProbeCount > 0 {
+			rangeBody["lte"] = query.MaxProbeCount
+		}
+		clauses = append(clauses, map[string]any{"range": map[string]any{"probe_count": rangeBody}})
+	}
+	if query.MinWindowMins > 0 || query.MaxWindowMins > 0 {
+		rangeBody := map[string]any{}
+		if query.MinWindowMins > 0 {
+			rangeBody["gte"] = query.MinWindowMins
+		}
+		if query.MaxWindowMins > 0 {
+			rangeBody["lte"] = query.MaxWindowMins
+		}
+		clauses = append(clauses, map[string]any{"range": map[string]any{"window_minutes": rangeBody}})
+	}
+	return clauses
 }
 
 func buildFlowFilters(query shared.FlowQuery) []map[string]any {

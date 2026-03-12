@@ -57,26 +57,6 @@ func (e *LocalEngine) SearchAlerts(ctx context.Context, query shared.AlertQuery)
 		}
 		items = filtered
 	}
-	filtered := make([]shared.Alert, 0, len(items))
-	for _, item := range items {
-		if query.AttackResult != "" && item.AttackResult != query.AttackResult {
-			continue
-		}
-		if query.MinProbeCount > 0 && item.ProbeCount < query.MinProbeCount {
-			continue
-		}
-		if query.MaxProbeCount > 0 && item.ProbeCount > query.MaxProbeCount {
-			continue
-		}
-		if query.MinWindowMins > 0 && item.WindowMinutes < query.MinWindowMins {
-			continue
-		}
-		if query.MaxWindowMins > 0 && item.WindowMinutes > query.MaxWindowMins {
-			continue
-		}
-		filtered = append(filtered, item)
-	}
-	items = filtered
 	sortAlerts(items, query.SortBy, query.SortOrder)
 	page, pageSize := normalizePage(query.Page, query.PageSize)
 	return shared.AlertListResponse{

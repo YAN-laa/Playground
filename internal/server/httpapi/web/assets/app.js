@@ -10,6 +10,8 @@ const state = {
   selectedTicket: null,
   selectedProbe: null,
   alertDetailTab: 'details',
+  alertConditionOrder: [],
+  draggedAlertConditionKey: '',
   selectedAlertIDs: new Set(),
   selectedTicketIDs: new Set(),
   alertPage: 1,
@@ -121,6 +123,17 @@ const alertSortOrderInput = $('alert-sort-order');
 const alertPageSizeInput = $('alert-page-size');
 const alertsPageJumpInput = $('alerts-page-jump');
 const alertsTotalInfo = $('alerts-total-info');
+const alertViewModeInput = $('alert-view-mode');
+const alertConditionLogicInput = $('alert-condition-logic');
+const alertConditionFieldInput = $('alert-condition-field');
+const alertConditionInputWrap = $('alert-condition-input-wrap');
+const alertConditionAddBtn = $('alert-condition-add-btn');
+const alertConditionSearchBtn = $('alert-condition-search-btn');
+const alertConditionResetBtn = $('alert-condition-reset-btn');
+const alertFilterChips = $('alert-filter-chips');
+const alertPriorityFill = $('alert-priority-fill');
+const alertPriorityLevel = $('alert-priority-level');
+const alertIntentCards = $('alert-intent-cards');
 const rawAlertSrcInput = $('raw-alert-src-filter');
 const rawAlertDstInput = $('raw-alert-dst-filter');
 const rawAlertSignatureInput = $('raw-alert-signature-filter');
@@ -177,6 +190,53 @@ const upgradePackageForm = $('upgrade-package-form');
 const probeUpgradeForm = $('probe-upgrade-form');
 const probeUpgradeBatchForm = $('probe-upgrade-batch-form');
 
+const ALERT_CONDITION_FIELDS = {
+  src: { label: '源 IP', input: srcInput, type: 'text', placeholder: '输入源 IP' },
+  dst: { label: '目的 IP', input: dstInput, type: 'text', placeholder: '输入目的 IP' },
+  signature: { label: '告警名称', input: signatureInput, type: 'text', placeholder: '输入告警名称 / 签名' },
+  assignee: { label: '处理人', input: assigneeInput, type: 'text', placeholder: '输入处理人' },
+  severity: {
+    label: '告警等级',
+    input: severityInput,
+    type: 'select',
+    options: [
+      { value: '', label: '选择告警等级' },
+      { value: '1', label: '高危' },
+      { value: '2', label: '中危' },
+      { value: '3', label: '低危' },
+    ],
+  },
+  status: {
+    label: '状态',
+    input: alertStatusInput,
+    type: 'select',
+    options: [
+      { value: '', label: '选择状态' },
+      { value: 'new', label: '待研判' },
+      { value: 'ack', label: '已确认' },
+      { value: 'in_progress', label: '处理中' },
+      { value: 'closed', label: '已关闭' },
+    ],
+  },
+  attack_result: {
+    label: '攻击结果',
+    input: alertAttackResultInput,
+    type: 'select',
+    options: [
+      { value: '', label: '选择攻击结果' },
+      { value: 'success', label: '成功' },
+      { value: 'failed', label: '失败' },
+      { value: 'attempted', label: '尝试' },
+      { value: 'unknown', label: '未知' },
+    ],
+  },
+  category: { label: '攻击类型', input: alertCategoryInput, type: 'text', placeholder: '输入攻击类型 / 分类' },
+  probe: { label: '探针', input: alertProbeInput, type: 'text', placeholder: '输入探针 ID' },
+  min_probe_count: { label: '跨探针数', input: alertProbeCountInput, type: 'number', placeholder: '输入最小跨探针数量', min: '1' },
+  min_window_mins: { label: '聚合窗口', input: alertWindowInput, type: 'number', placeholder: '输入最小聚合窗口（分钟）', min: '1' },
+  since: { label: '开始时间', input: alertSinceInput, type: 'datetime-local' },
+};
+
 $('login-form').addEventListener('submit', onLogin);
 $('refresh-btn').addEventListener('click', refreshCurrentPage);
 $('logout-btn').addEventListener('click', logout);
@@ -220,6 +280,13 @@ $('export-alerts-page-btn').addEventListener('click', async () => createAlertExp
 $('export-flows-page-btn').addEventListener('click', async () => createFlowExportTask());
 $('refresh-exports-btn').addEventListener('click', async () => loadExportTasks());
 $('refresh-query-stats-btn').addEventListener('click', async () => loadQueryStats());
+alertConditionFieldInput.addEventListener('change', () => renderAlertConditionInput());
+alertConditionAddBtn.addEventListener('click', async () => applyAlertConditionFromBuilder());
+alertConditionSearchBtn.addEventListener('click', async () => {
+  syncAlertConditionBuilderValue();
+  await resetAlertPageAndReload();
+});
+alertConditionResetBtn.addEventListener('click', async () => clearAllAlertConditions());
 backToAlertsBtn.addEventListener('click', async () => {
   await navigate('alerts');
 });
@@ -248,6 +315,7 @@ window.addEventListener('hashchange', async () => {
 
 [srcInput, dstInput, signatureInput, assigneeInput, severityInput, alertStatusInput, alertCategoryInput, alertProbeInput, alertAttackResultInput, alertProbeCountInput, alertWindowInput, alertSinceInput, alertSortByInput, alertSortOrderInput, alertPageSizeInput]
   .forEach((input) => input.addEventListener('change', async () => resetAlertPageAndReload()));
+alertConditionLogicInput.addEventListener('change', async () => resetAlertPageAndReload());
 [rawAlertSrcInput, rawAlertDstInput, rawAlertSignatureInput, rawAlertProbeInput, rawAlertSeverityInput, rawAlertAttackResultInput, rawAlertSinceInput, rawAlertPageSizeInput]
   .forEach((input) => input.addEventListener('change', async () => resetRawAlertPageAndReload()));
 [ticketStatusInput, ticketSinceInput, ticketSortByInput, ticketSortOrderInput, ticketPageSizeInput]
@@ -312,6 +380,7 @@ function logout() {
 
 async function afterLogin() {
   restoreFilters();
+  renderAlertConditionInput();
   await loadRoleTemplates();
   tenantInput.value = state.user.tenant_id;
   state.alertPageSize = Number(alertPageSizeInput.value || 10);
@@ -562,6 +631,7 @@ function buildRouteParams(page, options = {}) {
     case 'alerts':
     case 'alert-detail':
     case 'alert-relation':
+      appendIfValue(params, 'match_mode', alertConditionLogicInput.value);
       appendIfValue(params, 'src', srcInput.value);
       appendIfValue(params, 'dst', dstInput.value);
       appendIfValue(params, 'signature', signatureInput.value);
@@ -574,6 +644,7 @@ function buildRouteParams(page, options = {}) {
       appendIfValue(params, 'min_probe_count', alertProbeCountInput.value);
       appendIfValue(params, 'min_window_mins', alertWindowInput.value);
       appendIfValue(params, 'since', alertSinceInput.value);
+      appendIfValue(params, 'condition_order', state.alertConditionOrder.join(','));
       appendIfValue(params, 'sort_by', alertSortByInput.value);
       appendIfValue(params, 'sort_order', alertSortOrderInput.value);
       appendIfValue(params, 'page', String(options.page || state.alertPage || 1));
@@ -630,6 +701,7 @@ function applyRouteState(route) {
     case 'alerts':
     case 'alert-detail':
     case 'alert-relation':
+      alertConditionLogicInput.value = params.get('match_mode') || alertConditionLogicInput.value || 'all';
       srcInput.value = params.get('src') || srcInput.value || '';
       dstInput.value = params.get('dst') || dstInput.value || '';
       signatureInput.value = params.get('signature') || signatureInput.value || '';
@@ -642,11 +714,17 @@ function applyRouteState(route) {
       alertProbeCountInput.value = params.get('min_probe_count') || alertProbeCountInput.value || '';
       alertWindowInput.value = params.get('min_window_mins') || alertWindowInput.value || '';
       alertSinceInput.value = params.get('since') || alertSinceInput.value || '';
+      const routeOrder = splitCSV(params.get('condition_order') || '');
+      if (routeOrder.length) {
+        state.alertConditionOrder = routeOrder;
+      }
       alertSortByInput.value = params.get('sort_by') || alertSortByInput.value || 'last_seen_at';
       alertSortOrderInput.value = params.get('sort_order') || alertSortOrderInput.value || 'desc';
       alertPageSizeInput.value = params.get('page_size') || alertPageSizeInput.value || '10';
       state.alertPageSize = Number(alertPageSizeInput.value || 10);
       state.alertPage = Math.max(1, Number(params.get('page') || state.alertPage || 1));
+      normalizeAlertConditionOrder();
+      renderAlertConditionInput();
       break;
     case 'tickets':
     case 'ticket-detail':
@@ -792,6 +870,7 @@ async function loadOverviewStats() {
 
 async function loadAlerts() {
   const params = new URLSearchParams({ tenant_id: tenantInput.value });
+  if (alertConditionLogicInput.value) params.set('match_mode', alertConditionLogicInput.value);
   if (srcInput.value) params.set('src_ip', srcInput.value);
   if (dstInput.value) params.set('dst_ip', dstInput.value);
   if (signatureInput.value) params.set('signature', signatureInput.value);
@@ -799,6 +878,8 @@ async function loadAlerts() {
   if (severityInput.value) params.set('severity', severityInput.value);
   if (alertStatusInput.value) params.set('status', alertStatusInput.value);
   if (alertAttackResultInput.value) params.set('attack_result', alertAttackResultInput.value);
+  if (alertCategoryInput.value) params.set('category', alertCategoryInput.value);
+  if (alertProbeInput.value) params.set('probe', alertProbeInput.value);
   if (alertProbeCountInput.value) params.set('min_probe_count', alertProbeCountInput.value);
   if (alertWindowInput.value) params.set('min_window_mins', alertWindowInput.value);
   if (alertSinceInput.value) params.set('since', new Date(alertSinceInput.value).toISOString());
@@ -808,11 +889,7 @@ async function loadAlerts() {
   params.set('page_size', state.alertPageSize);
   const response = await request(`/api/v1/alerts?${params.toString()}`);
   persistAlertFilters();
-  const alerts = (response.items || []).filter((alert) => {
-    const categoryMatch = !alertCategoryInput.value || String(alert.category || '').toLowerCase().includes(alertCategoryInput.value.trim().toLowerCase());
-    const probeMatch = !alertProbeInput.value || (alert.probe_ids || []).some((probeID) => probeID.includes(alertProbeInput.value.trim()));
-    return categoryMatch && probeMatch;
-  });
+  const alerts = response.items || [];
   syncSelectedAlerts(alerts);
   $('alerts-body').innerHTML = alerts.map((alert) => `
     <tr data-alert-id="${alert.id}" class="alert-row">
@@ -866,8 +943,303 @@ async function loadAlerts() {
   const total = response.total || 0;
   const pages = Math.max(1, Math.ceil(total / (response.page_size || state.alertPageSize)));
   $('alerts-page-info').textContent = `第 ${response.page || 1} 页 / 共 ${pages} 页`;
-  const localFiltered = Boolean(alertCategoryInput.value || alertProbeInput.value);
-  alertsTotalInfo.textContent = localFiltered ? `当前页筛选后 ${alerts.length} 条 / 服务端共 ${total} 条` : `共 ${total} 条告警`;
+  alertsTotalInfo.textContent = `共 ${total} 条告警`;
+  renderAlertFilterChips();
+  renderAlertAnalysisBoard(alerts, total);
+}
+
+function renderAlertFilterChips() {
+  normalizeAlertConditionOrder();
+  const chips = buildAlertFilterChips();
+  alertFilterChips.innerHTML = chips.length
+    ? chips.map((chip) => `
+      <button
+        type="button"
+        class="filter-chip removable"
+        data-alert-clear-field="${escapeHTML(chip.key)}"
+        data-alert-condition-chip="${escapeHTML(chip.key)}"
+        draggable="true"
+      >
+        <strong>${escapeHTML(chip.label)}</strong>
+        <span>${escapeHTML(chip.value)}</span>
+        <span class="filter-chip-close">×</span>
+      </button>
+    `).join('')
+    : '<span class="filter-chip subtle">当前未设置筛选条件</span>';
+  bindAlertFilterChipInteractions();
+}
+
+function buildAlertFilterChips() {
+  const chips = [
+    srcInput.value ? { key: 'src', label: '源 IP', value: srcInput.value } : null,
+    dstInput.value ? { key: 'dst', label: '目的 IP', value: dstInput.value } : null,
+    signatureInput.value ? { key: 'signature', label: '告警名称', value: signatureInput.value } : null,
+    assigneeInput.value ? { key: 'assignee', label: '处理人', value: assigneeInput.value } : null,
+    alertAttackResultInput.value ? { key: 'attack_result', label: '攻击结果', value: formatAttackResult(alertAttackResultInput.value) } : null,
+    severityInput.value ? { key: 'severity', label: '告警等级', value: formatSeverity(severityInput.value) } : null,
+    alertCategoryInput.value ? { key: 'category', label: '攻击类型', value: alertCategoryInput.value } : null,
+    alertProbeInput.value ? { key: 'probe', label: '探针', value: alertProbeInput.value } : null,
+    alertStatusInput.value ? { key: 'status', label: '状态', value: formatAlertStatus(alertStatusInput.value) } : null,
+    alertProbeCountInput.value ? { key: 'min_probe_count', label: '跨探针数', value: `≥ ${alertProbeCountInput.value}` } : null,
+    alertWindowInput.value ? { key: 'min_window_mins', label: '聚合窗口', value: `≥ ${alertWindowInput.value} 分钟` } : null,
+    alertSinceInput.value ? { key: 'since', label: '开始时间', value: formatDateTime(alertSinceInput.value) } : null,
+  ].filter(Boolean);
+  const orderIndex = new Map(normalizeAlertConditionOrder().map((key, index) => [key, index]));
+  return chips.sort((left, right) => {
+    const leftIndex = orderIndex.has(left.key) ? orderIndex.get(left.key) : Number.MAX_SAFE_INTEGER;
+    const rightIndex = orderIndex.has(right.key) ? orderIndex.get(right.key) : Number.MAX_SAFE_INTEGER;
+    return leftIndex - rightIndex;
+  });
+}
+
+function normalizeAlertConditionOrder() {
+  const active = getActiveAlertConditionKeysUnsorted();
+  const activeSet = new Set(active);
+  const current = Array.isArray(state.alertConditionOrder) ? state.alertConditionOrder.filter((key) => activeSet.has(key)) : [];
+  const missing = active.filter((key) => !current.includes(key));
+  state.alertConditionOrder = [...current, ...missing];
+  return state.alertConditionOrder;
+}
+
+function getActiveAlertConditionKeysUnsorted() {
+  return [
+    srcInput.value ? 'src' : '',
+    dstInput.value ? 'dst' : '',
+    signatureInput.value ? 'signature' : '',
+    assigneeInput.value ? 'assignee' : '',
+    alertAttackResultInput.value ? 'attack_result' : '',
+    severityInput.value ? 'severity' : '',
+    alertCategoryInput.value ? 'category' : '',
+    alertProbeInput.value ? 'probe' : '',
+    alertStatusInput.value ? 'status' : '',
+    alertProbeCountInput.value ? 'min_probe_count' : '',
+    alertWindowInput.value ? 'min_window_mins' : '',
+    alertSinceInput.value ? 'since' : '',
+  ].filter(Boolean);
+}
+
+function bindAlertFilterChipInteractions() {
+  document.querySelectorAll('[data-alert-clear-field]').forEach((button) => button.addEventListener('click', async (event) => {
+    if (event.target?.classList?.contains('filter-chip-close')) {
+      event.preventDefault();
+      event.stopPropagation();
+      await clearAlertCondition(button.dataset.alertClearField || '');
+    }
+  }));
+  document.querySelectorAll('[data-alert-condition-chip]').forEach((button) => {
+    const key = button.dataset.alertConditionChip || '';
+    button.addEventListener('dragstart', () => {
+      state.draggedAlertConditionKey = key;
+      button.classList.add('dragging');
+    });
+    button.addEventListener('dragend', () => {
+      state.draggedAlertConditionKey = '';
+      button.classList.remove('dragging');
+      document.querySelectorAll('[data-alert-condition-chip]').forEach((item) => item.classList.remove('drag-over'));
+    });
+    button.addEventListener('dragover', (event) => {
+      event.preventDefault();
+      button.classList.add('drag-over');
+    });
+    button.addEventListener('dragleave', () => {
+      button.classList.remove('drag-over');
+    });
+    button.addEventListener('drop', (event) => {
+      event.preventDefault();
+      button.classList.remove('drag-over');
+      const fromKey = state.draggedAlertConditionKey;
+      const toKey = key;
+      if (!fromKey || !toKey || fromKey === toKey) return;
+      reorderAlertCondition(fromKey, toKey);
+    });
+  });
+}
+
+function reorderAlertCondition(fromKey, toKey) {
+  const current = normalizeAlertConditionOrder().slice();
+  const fromIndex = current.indexOf(fromKey);
+  const toIndex = current.indexOf(toKey);
+  if (fromIndex === -1 || toIndex === -1) return;
+  current.splice(fromIndex, 1);
+  current.splice(toIndex, 0, fromKey);
+  state.alertConditionOrder = current;
+  persistAlertFilters();
+  renderAlertFilterChips();
+}
+
+function renderAlertConditionInput() {
+  if (!alertConditionFieldInput || !alertConditionInputWrap) return;
+  const config = ALERT_CONDITION_FIELDS[alertConditionFieldInput.value] || ALERT_CONDITION_FIELDS.src;
+  const currentValue = config.input?.value || '';
+  if (config.type === 'select') {
+    alertConditionInputWrap.innerHTML = `
+      <select id="alert-condition-value" class="alert-condition-value">
+        ${(config.options || []).map((option) => `
+          <option value="${escapeHTML(option.value)}" ${String(option.value) === String(currentValue) ? 'selected' : ''}>
+            ${escapeHTML(option.label)}
+          </option>
+        `).join('')}
+      </select>
+    `;
+    const selectControl = $('alert-condition-value');
+    if (selectControl) {
+      selectControl.addEventListener('keydown', async (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          await applyAlertConditionFromBuilder();
+        }
+      });
+    }
+    return;
+  }
+  const inputType = config.type === 'number' ? 'number' : config.type === 'datetime-local' ? 'datetime-local' : 'text';
+  const minAttr = config.min ? `min="${escapeHTML(config.min)}"` : '';
+  alertConditionInputWrap.innerHTML = `
+    <input
+      id="alert-condition-value"
+      class="alert-condition-value"
+      type="${inputType}"
+      value="${escapeHTML(currentValue)}"
+      placeholder="${escapeHTML(config.placeholder || '')}"
+      ${minAttr}
+    />
+  `;
+  const inputControl = $('alert-condition-value');
+  if (inputControl) {
+    inputControl.addEventListener('keydown', async (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        await applyAlertConditionFromBuilder();
+      }
+    });
+  }
+}
+
+async function applyAlertConditionFromBuilder() {
+  syncAlertConditionBuilderValue();
+  renderAlertConditionInput();
+  await resetAlertPageAndReload();
+}
+
+function syncAlertConditionBuilderValue() {
+  const config = ALERT_CONDITION_FIELDS[alertConditionFieldInput.value];
+  const control = $('alert-condition-value');
+  if (!config || !control) return;
+  config.input.value = String(control.value || '').trim();
+}
+
+async function clearAlertCondition(fieldKey) {
+  const config = ALERT_CONDITION_FIELDS[fieldKey];
+  if (!config?.input) return;
+  config.input.value = '';
+  if (alertConditionFieldInput.value === fieldKey) {
+    renderAlertConditionInput();
+  }
+  await resetAlertPageAndReload();
+}
+
+async function clearAllAlertConditions() {
+  Object.values(ALERT_CONDITION_FIELDS).forEach((config) => {
+    if (config?.input) {
+      config.input.value = '';
+    }
+  });
+  state.alertConditionOrder = [];
+  renderAlertConditionInput();
+  await resetAlertPageAndReload();
+}
+
+function renderAlertAnalysisBoard(alerts, total) {
+  const summary = buildAlertAnalysisSummary(alerts);
+  const width = summary.priorityScore;
+  alertPriorityFill.style.width = `${width}%`;
+  alertPriorityFill.className = `alert-priority-fill ${summary.priorityClass}`;
+  alertPriorityLevel.textContent = summary.priorityLabel;
+  const groups = [
+    { key: '人工渗透', tone: 'red' },
+    { key: '程序自动化', tone: 'orange' },
+    { key: '业务风险', tone: 'yellow' },
+    { key: '未定性威胁', tone: 'slate' },
+  ];
+  alertIntentCards.innerHTML = groups.map((group) => {
+    const cards = summary.cards.filter((card) => card.group === group.key);
+    return `
+      <section class="intent-lane intent-lane-${group.tone}">
+        <div class="intent-lane-head">
+          <span class="intent-lane-title">${escapeHTML(group.key)}</span>
+        </div>
+        <div class="intent-lane-track">
+          ${cards.map((card) => `
+            <button type="button" class="intent-card intent-card-${card.tone} ${card.active ? 'active' : ''}" data-intent-filter="${escapeHTML(card.filter || '')}">
+              <span class="intent-card-type">${escapeHTML(card.label)}</span>
+              <strong>${card.count}</strong>
+              <small>${escapeHTML(card.desc)}</small>
+            </button>
+          `).join('')}
+        </div>
+      </section>
+    `;
+  }).join('');
+  document.querySelectorAll('[data-intent-filter]').forEach((button) => button.addEventListener('click', async () => {
+    const filter = button.dataset.intentFilter || '';
+    alertCategoryInput.value = filter;
+    state.alertPage = 1;
+    await loadAlerts();
+  }));
+  if (!alerts.length) {
+    alertsTotalInfo.textContent = `${alertsTotalInfo.textContent} · 当前页暂无数据，智能分析面板按空结果展示`;
+  } else if (total) {
+    alertsTotalInfo.textContent = `${alertsTotalInfo.textContent} · 智能分析基于当前页 ${alerts.length} 条结果`;
+  }
+}
+
+function buildAlertAnalysisSummary(alerts) {
+  const buckets = [
+    { key: 'targeted', tone: 'red', group: '人工渗透', label: '定向攻击', desc: '具备明确利用意图、目标清晰的攻击事件。', filter: '定向攻击', count: 0 },
+    { key: 'suspected', tone: 'red', group: '人工渗透', label: '疑似定向攻击', desc: '存在利用特征，但攻击结果或上下文还不充分。', filter: '疑似', count: 0 },
+    { key: 'malware', tone: 'orange', group: '程序自动化', label: '病毒', desc: '恶意样本、僵尸网络、木马和投毒类事件。', filter: '病毒', count: 0 },
+    { key: 'scanner', tone: 'orange', group: '程序自动化', label: '扫描器攻击', desc: '批量探测、弱口令尝试和自动化扫描行为。', filter: '扫描', count: 0 },
+    { key: 'vuln', tone: 'yellow', group: '业务风险', label: '脆弱性风险', desc: '漏洞利用、公开组件弱点和高危暴露。', filter: '风险', count: 0 },
+    { key: 'biz', tone: 'yellow', group: '业务风险', label: '业务行为', desc: '业务相关异常、越权和非标准访问行为。', filter: '业务', count: 0 },
+    { key: 'unknown', tone: 'slate', group: '未定性威胁', label: '未定性威胁', desc: '当前还无法判定具体攻击性质的告警。', filter: '', count: 0 },
+  ];
+  let highestRisk = 0;
+  let successCount = 0;
+  let severeCount = 0;
+  for (const alert of alerts || []) {
+    highestRisk = Math.max(highestRisk, Number(alert.risk_score || 0));
+    if (String(alert.attack_result || '').toLowerCase() === 'success') successCount += 1;
+    if (Number(alert.severity || 0) === 1) severeCount += 1;
+    const bucket = classifyAlertIntent(alert);
+    const target = buckets.find((item) => item.key === bucket) || buckets[buckets.length - 1];
+    target.count += 1;
+  }
+  const priorityScore = Math.max(18, Math.min(100, highestRisk || (successCount ? 82 : severeCount ? 70 : 36)));
+  const priorityLabel = priorityScore >= 75 ? '高' : priorityScore >= 45 ? '中' : '低';
+  const priorityClass = priorityScore >= 75 ? 'high' : priorityScore >= 45 ? 'medium' : 'low';
+  const cards = buckets.map((item) => ({
+    ...item,
+    active: item.count > 0,
+  }));
+  return { priorityScore, priorityLabel, priorityClass, cards };
+}
+
+function classifyAlertIntent(alert) {
+  const signature = String(alert.signature || '').toLowerCase();
+  const category = String(alert.category || '').toLowerCase();
+  const attackResult = String(alert.attack_result || '').toLowerCase();
+  const text = `${signature} ${category}`;
+  if (/(trojan|backdoor|botnet|malware|virus|worm|勒索|木马|僵尸|xred|c2)/.test(text)) return 'malware';
+  if (/(scan|scanner|bruteforce|recon|扫描|弱口令|探测)/.test(text)) return 'scanner';
+  if (/(cve|exploit|rce|sql|xss|upload|webshell|命令执行|代码注入|文件上传|漏洞)/.test(text)) {
+    return attackResult === 'success' || Number(alert.severity || 0) === 1 ? 'targeted' : 'vuln';
+  }
+  if (/(定向|initial_access|privilege|administrator|横向|lateral|外联|账号)/.test(text)) {
+    return attackResult === 'success' || attackResult === 'failed' ? 'targeted' : 'suspected';
+  }
+  if (/(业务|dns|not suspicious traffic|信息|p2p|unusual|异常访问)/.test(text)) return 'biz';
+  if (attackResult === 'success' || attackResult === 'failed') return 'suspected';
+  return 'unknown';
 }
 
 async function loadRawAlerts() {
@@ -1397,32 +1769,20 @@ function renderAlertTabButton(key, label) {
 function renderAlertDetailSummaryTab(detail) {
   const overview = buildAlertSummaryOverview(detail);
   return `
-    <div class="detail-tab-grid detail-tab-grid-ref">
-      <section class="detail-tab-section detail-hero-section">
-        <div class="detail-summary-grid">
-          ${renderAlertOverview(detail)}
-          ${renderAlertInsightPanel(overview)}
-        </div>
+    <div class="detail-tab-grid detail-tab-grid-ref detail-scene-grid">
+      <section class="detail-tab-section detail-scene-summary">
+        ${renderAlertOverview(detail)}
       </section>
       <section class="detail-tab-section">
         <h3>举证详情</h3>
         ${renderProtocolEvidenceScene(detail)}
       </section>
       <section class="detail-tab-section">
+        <h3>关联流量与同 Flow 时间线</h3>
         <div class="detail-split-grid">
-          <div>
-            <h3>关联流量</h3>
-            ${renderFlowEvidence(detail.flows || [], detail)}
-          </div>
-          <div>
-            <h3>同 Flow 时间线</h3>
-            ${renderTimelinePanel(detail.same_flow_timeline || [], 'flow')}
-          </div>
+          <div>${renderFlowEvidence(detail.flows || [], detail)}</div>
+          <div>${renderTimelinePanel(detail.same_flow_timeline || [], 'flow')}</div>
         </div>
-      </section>
-      <section class="detail-tab-section">
-        <h3>分析上下文事件流</h3>
-        ${renderProtocolPanel(detail, 'alert-detail')}
       </section>
     </div>
   `;
@@ -1578,34 +1938,46 @@ function renderFieldCell(label, value) {
 
 function renderAlertOverview(detail) {
   const basis = detail?.decision_basis || {};
+  const resultText = formatAttackResult(detail?.alert?.attack_result || basis.attack_result);
+  const resultReason = basis.attack_result_reason || '当前上下文没有足够证据，无法确认攻击是否成功。';
   return `
-    <div class="alert-overview-card alert-overview-ref">
-      <div class="context-grid alert-overview-grid">
-        <div class="context-field">
+    <div class="alert-overview-card alert-overview-ref scene-overview-card">
+      <div class="scene-kpi-grid">
+        <div class="scene-kpi-card">
           <span>攻击结果</span>
-          <strong>${escapeHTML(formatAttackResult(detail?.alert?.attack_result || basis.attack_result))}</strong>
+          <strong>${escapeHTML(resultText)}</strong>
+          <small>${escapeHTML(resultReason)}</small>
         </div>
-        <div class="context-field">
-          <span>结果说明</span>
-          <strong>${escapeHTML(basis.attack_result_reason || '缺少可判定依据')}</strong>
+        <div class="scene-kpi-card">
+          <span>风险分</span>
+          <strong>${escapeHTML(String(detail?.alert?.risk_score || 0))}</strong>
+          <small>${escapeHTML(formatSeverity(detail?.alert?.severity) || '未知')} · ${escapeHTML(detail?.alert?.category || '未分类')}</small>
         </div>
-        <div class="context-field">
+        <div class="scene-kpi-card">
           <span>聚合窗口</span>
           <strong>${escapeHTML(String(detail?.alert?.window_minutes || 30))} 分钟</strong>
+          <small>${escapeHTML((basis.aggregation_reason || []).slice(0, 1).join('；') || '当前窗口内按同类攻击聚合')}</small>
         </div>
-        <div class="context-field">
+        <div class="scene-kpi-card">
           <span>跨探针数量</span>
           <strong>${escapeHTML(String(detail?.alert?.probe_count || (detail?.alert?.probe_ids || []).length || 1))}</strong>
+          <small>当前攻击窗口内涉及的探针数量</small>
         </div>
       </div>
-      <div class="overview-reason-grid">
-        <div class="context-list">
-          <span>聚合依据</span>
-          ${(basis.aggregation_reason || []).map((item) => `<code>${escapeHTML(item)}</code>`).join('') || '<code>暂无聚合依据</code>'}
+      <div class="scene-context-grid">
+        <div class="scene-context-card">
+          <span>基础信息</span>
+          <div class="scene-info-grid">
+            ${renderFieldCell('最近发生', formatDateTime(detail?.alert?.last_seen_at))}
+            ${renderFieldCell('影响资产', detail?.alert?.target_asset_name || detail?.alert?.dst_ip || '-')}
+            ${renderFieldCell('攻击路径', `${detail?.alert?.src_ip || '-'} -> ${detail?.alert?.dst_ip || '-'}`)}
+            ${renderFieldCell('数据源', formatProbeSummary(detail?.alert?.probe_ids || []))}
+          </div>
         </div>
-        <div class="context-list">
-          <span>风险依据</span>
-          ${(basis.risk_reason || []).map((item) => `<code>${escapeHTML(item)}</code>`).join('') || '<code>暂无风险依据</code>'}
+        <div class="scene-context-card">
+          <span>告警详情</span>
+          <p>${escapeHTML(buildAlertSummaryOverview(detail).description)}</p>
+          ${basis.response_snippet ? `<div class="scene-evidence-inline"><span>响应判据</span><code>${escapeHTML(basis.response_snippet)}</code></div>` : ''}
         </div>
       </div>
     </div>
@@ -1642,8 +2014,6 @@ function renderProtocolEvidenceScene(detail) {
 }
 
 function renderHTTPEvidenceWorkbench(exchange, detail) {
-  const requestParsed = parseHTTPRequest(exchange.requestRaw || '');
-  const responseParsed = parseHTTPResponse(exchange.responseRaw || '');
   return `
     <div class="protocol-workbench">
       <div class="protocol-summary-bar">
@@ -1652,15 +2022,14 @@ function renderHTTPEvidenceWorkbench(exchange, detail) {
         <span class="cell-sub">主机 ${escapeHTML(exchange.host || '-')}</span>
         <span class="cell-sub">状态 ${escapeHTML(exchange.status || '-')}</span>
       </div>
-      <div class="packet-split">
-        ${renderPacketPanel('请求包', requestParsed.startLine || exchange.requestMeta || '按可读请求整理', requestParsed.headers, requestParsed.body || exchange.requestBody || '')}
-        ${renderPacketPanel('响应包', responseParsed.startLine || exchange.responseMeta || '按可读响应整理', responseParsed.headers, responseParsed.body || exchange.responseBody || detail?.decision_basis?.response_snippet || '')}
-      </div>
+      ${renderBurpExchange(exchange, detail?.decision_basis)}
     </div>
   `;
 }
 
 function renderDNSEvidenceWorkbench(dnsEvidence, detail) {
+  const intelTags = (detail.alert.threat_intel_tags || []).join('、') || '暂无直接情报标签';
+  const intelHits = (detail.alert.threat_intel_hits || []).join('、') || '暂无命中项';
   return `
     <div class="protocol-workbench">
       <div class="protocol-summary-bar">
@@ -1673,23 +2042,39 @@ function renderDNSEvidenceWorkbench(dnsEvidence, detail) {
         <div class="dns-node-card">
           <span class="detail-subtitle">源 IP</span>
           <strong>${escapeHTML(detail.alert.src_ip || '-')}</strong>
+          <span>${escapeHTML(detail.alert.source_asset_name || '未识别源资产')}</span>
           <span>端口 ${escapeHTML(String(detail.alert.src_port || '-'))}</span>
         </div>
         <div class="dns-link-stack">
           <div class="dns-link-chip">请求域名 ${escapeHTML(dnsEvidence.query || '-')}</div>
-          <div class="dns-link-chip subtle">${escapeHTML(dnsEvidence.answers ? `解析结果 ${dnsEvidence.answers}` : '暂无解析结果')}</div>
+          <div class="dns-link-chip subtle">${escapeHTML(dnsEvidence.answers ? `解析结果 ${dnsEvidence.answers}` : '解析失败 / 暂无解析结果')}</div>
         </div>
         <div class="dns-node-card">
           <span class="detail-subtitle">DNS 服务器</span>
           <strong>${escapeHTML(detail.alert.dst_ip || '-')}</strong>
+          <span>${escapeHTML(detail.alert.target_asset_name || '解析目标')}</span>
           <span>端口 ${escapeHTML(String(detail.alert.dst_port || '-'))}</span>
         </div>
       </div>
-      <div class="context-grid dns-evidence-grid">
-        ${renderFieldCell('DNS 查询域名', dnsEvidence.query || '-')}
-        ${renderFieldCell('DNS 查询类型', dnsEvidence.type || '-')}
-        ${renderFieldCell('DNS 响应结果', dnsEvidence.answers || '-')}
-        ${renderFieldCell('DNS 事务 ID', dnsEvidence.txID || '-')}
+      <div class="dns-detail-grid">
+        <div class="dns-detail-panel">
+          <h4>举证详情</h4>
+          <div class="context-grid dns-evidence-grid">
+            ${renderFieldCell('DNS 查询域名', dnsEvidence.query || '-')}
+            ${renderFieldCell('DNS 查询类型', dnsEvidence.type || '-')}
+            ${renderFieldCell('DNS 响应结果', dnsEvidence.answers || '-')}
+            ${renderFieldCell('DNS 事务 ID', dnsEvidence.txID || '-')}
+          </div>
+        </div>
+        <div class="dns-detail-panel">
+          <h4>情报分析</h4>
+          <div class="context-grid dns-evidence-grid compact-dns-grid">
+            ${renderFieldCell('影响资产', detail.alert.target_asset_name || detail.alert.dst_ip || '-')}
+            ${renderFieldCell('威胁标签', intelTags)}
+            ${renderFieldCell('IOC 命中', intelHits)}
+            ${renderFieldCell('攻击结果', formatAttackResult(detail.alert.attack_result))}
+          </div>
+        </div>
       </div>
     </div>
   `;
@@ -1920,41 +2305,33 @@ function renderRelationGraph(graph) {
 function renderBurpExchange(exchange, basis) {
   if (!exchange) {
     return `
-      <div class="burp-grid">
-        <div class="burp-panel">
-          <div class="burp-panel-head">
-            <strong>请求包</strong>
-            <span>当前协议没有可展示的可读请求数据</span>
-          </div>
-          <pre class="burp-raw">暂无可读请求包</pre>
-        </div>
-        <div class="burp-panel">
-          <div class="burp-panel-head">
-            <strong>响应包</strong>
-            <span>当前协议没有可展示的可读响应数据</span>
-          </div>
-          <pre class="burp-raw">${escapeHTML(basis?.response_snippet || '暂无可读响应包')}</pre>
-        </div>
+      <div class="burp-quad-grid">
+        ${renderPacketBlockPanel('请求头', '暂无可读请求头', '')}
+        ${renderPacketBlockPanel('请求体', '暂无可读请求体', '')}
+        ${renderPacketBlockPanel('响应头', '暂无可读响应头', basis?.response_snippet || '')}
+        ${renderPacketBlockPanel('响应体', '暂无可读响应体', '')}
       </div>
     `;
   }
   return `
-    <div class="burp-grid">
-      <div class="burp-panel">
-        <div class="burp-panel-head">
-          <strong>请求包</strong>
-          <span>${escapeHTML(exchange.requestMeta || '按可读 HTTP 上下文整理')}</span>
-        </div>
-        <pre class="burp-raw">${escapeHTML(exchange.requestRaw || '暂无可读请求包')}</pre>
-      </div>
-      <div class="burp-panel">
-        <div class="burp-panel-head">
-          <strong>响应包</strong>
-          <span>${escapeHTML(exchange.responseMeta || '按响应状态和响应体整理')}</span>
-        </div>
-        <pre class="burp-raw">${escapeHTML(exchange.responseRaw || basis?.response_snippet || '暂无可读响应包')}</pre>
-      </div>
+    <div class="burp-quad-grid">
+      ${renderPacketBlockPanel('请求头', exchange.requestHeaderMeta || 'HTTP 请求头', exchange.requestHeaderText || exchange.requestRaw || '')}
+      ${renderPacketBlockPanel('请求体', exchange.requestBodyMeta || 'HTTP 请求体', exchange.requestBodyDetailed || exchange.requestBody || '')}
+      ${renderPacketBlockPanel('响应头', exchange.responseHeaderMeta || 'HTTP 响应头', exchange.responseHeaderText || exchange.responseRaw || basis?.response_snippet || '')}
+      ${renderPacketBlockPanel('响应体', exchange.responseBodyMeta || 'HTTP 响应体', exchange.responseBodyDetailed || exchange.responseBody || '')}
     </div>
+  `;
+}
+
+function renderPacketBlockPanel(title, subtitle, content) {
+  return `
+    <section class="packet-block-panel">
+      <div class="packet-block-head">
+        <strong>${escapeHTML(title)}</strong>
+        <span>${escapeHTML(subtitle || '')}</span>
+      </div>
+      <pre class="packet-block-body">${escapeHTML(content || '暂无可读内容')}</pre>
+    </section>
   `;
 }
 
@@ -2455,11 +2832,16 @@ async function createAlertExportTask() {
     format: exportFormatInput.value || 'json',
     alert_query: {
       tenant_id: tenantInput.value,
+      match_mode: alertConditionLogicInput.value,
       src_ip: srcInput.value,
       dst_ip: dstInput.value,
       signature: signatureInput.value,
       assignee: assigneeInput.value,
       severity: Number(severityInput.value || 0),
+      status: alertStatusInput.value,
+      attack_result: alertAttackResultInput.value,
+      category: alertCategoryInput.value,
+      probe: alertProbeInput.value,
       since: alertSinceInput.value ? new Date(alertSinceInput.value).toISOString() : '',
       sort_by: alertSortByInput.value || 'last_seen_at',
       sort_order: alertSortOrderInput.value || 'desc',
@@ -2572,6 +2954,8 @@ async function resetRawAlertPageAndReload() {
 
 function persistAlertFilters() {
   localStorage.setItem(STORAGE_KEYS.alerts, JSON.stringify({
+    matchMode: alertConditionLogicInput.value,
+    conditionOrder: normalizeAlertConditionOrder(),
     src: srcInput.value,
     dst: dstInput.value,
     signature: signatureInput.value,
@@ -2638,6 +3022,8 @@ function persistQueryStatsFilters() {
 
 function restoreFilters() {
   restoreObject(STORAGE_KEYS.alerts, (value) => {
+    alertConditionLogicInput.value = value.matchMode || 'all';
+    state.alertConditionOrder = Array.isArray(value.conditionOrder) ? value.conditionOrder : splitCSV(value.conditionOrder || '');
     srcInput.value = value.src || '';
     dstInput.value = value.dst || '';
     signatureInput.value = value.signature || '';
@@ -2653,6 +3039,7 @@ function restoreFilters() {
     alertSortByInput.value = value.sortBy || 'last_seen_at';
     alertSortOrderInput.value = value.sortOrder || 'desc';
     alertPageSizeInput.value = value.pageSize || '10';
+    normalizeAlertConditionOrder();
   });
   restoreObject(STORAGE_KEYS.tickets, (value) => {
     ticketStatusInput.value = value.status || '';
@@ -3074,11 +3461,14 @@ function extractHTTPContext(payload) {
     payload.payload,
   );
   const requestParsed = parseHTTPRequest(requestText);
+  const responseParsed = parseHTTPResponse(responseText);
   const requestHeadersAll = requestParsed.headers || [];
   const requestHeaders = filterUsefulHeaders(requestHeadersAll);
+  const responseHeadersAll = responseParsed.headers || [];
+  const responseHeadersUseful = responseHeadersAll.length ? responseHeadersAll : buildResponseHeaders(contentType, responseBodyRaw);
   const requestBodyDetailed = truncateAnalysisText(selectDetailedBody(requestBodyRaw || requestParsed.body, contentType), 12000);
-  const responseBodyDetailed = truncateAnalysisText(selectDetailedBody(responseBodyRaw, contentType), 12000);
-  const responseHeaders = buildResponseHeaders(contentType, responseBodyDetailed);
+  const responseBodyDetailed = truncateAnalysisText(selectDetailedBody(responseBodyRaw || responseParsed.body, contentType), 12000);
+  const responseHeaders = responseHeadersAll.length ? responseHeadersAll : buildResponseHeaders(contentType, responseBodyDetailed);
   const requestBody = summarizeText(requestBodyDetailed, 1200);
   const responseBody = summarizeText(responseBodyDetailed, 1200);
   if (!method && !url && !host && !userAgent && !contentType && !status && !requestBody && !responseBody && !requestHeaders.length && !requestText && !responseText) {
@@ -3113,9 +3503,23 @@ function extractHTTPContext(payload) {
     contentType,
     status,
     requestHeaders,
-    responseHeaders,
+    responseHeaders: responseHeadersUseful,
     requestBody,
     responseBody,
+    requestBodyDetailed,
+    responseBodyDetailed,
+    requestHeaderText: truncateAnalysisText([
+      requestParsed.startLine,
+      ...requestHeadersAll.map((item) => `${item.name}: ${item.value}`),
+    ].filter(Boolean).join('\n'), 12000),
+    responseHeaderText: truncateAnalysisText([
+      responseParsed.startLine || (status ? `HTTP/1.1 ${status}` : ''),
+      ...responseHeaders.map((item) => `${item.name}: ${item.value}`),
+    ].filter(Boolean).join('\n'), 12000),
+    requestHeaderMeta: requestParsed.startLine || 'HTTP 请求头',
+    responseHeaderMeta: responseParsed.startLine || (status ? `HTTP/1.1 ${status}` : 'HTTP 响应头'),
+    requestBodyMeta: requestBodyDetailed ? `长度 ${requestBodyDetailed.length}` : 'HTTP 请求体',
+    responseBodyMeta: responseBodyDetailed ? `长度 ${responseBodyDetailed.length}` : 'HTTP 响应体',
     requestRaw,
     responseRaw,
   };
