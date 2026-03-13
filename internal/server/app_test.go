@@ -732,7 +732,7 @@ func TestAlertAggregationWindowAndCrossProbe(t *testing.T) {
 		RuleVersion: "rules-v1",
 	}, &probeB, http.StatusCreated, "")
 
-	baseTime := time.Date(2026, 3, 11, 10, 0, 0, 0, time.UTC)
+	baseTime := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
 	doJSON(t, handler, "/api/v1/events/ingest", http.MethodPost, shared.EventBatch{
 		TenantID: "tenant-agg",
 		ProbeID:  probeA.ID,

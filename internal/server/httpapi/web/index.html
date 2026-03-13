@@ -105,14 +105,18 @@
                     <span>根据当前筛选结果自动计算</span>
                   </div>
                   <div class="alert-priority-body">
-                    <span class="muted">推荐关注优先级</span>
+                    <div class="alert-priority-overview">
+                      <span class="muted">推荐关注优先级</span>
+                      <div class="alert-priority-scale">
+                        <strong id="alert-priority-level">高</strong>
+                        <span id="alert-priority-score-text">关注指数 0 / 100</span>
+                      </div>
+                      <p id="alert-priority-note" class="muted alert-priority-note">根据当前页结果给出关注建议</p>
+                    </div>
                     <div class="alert-priority-meter">
                       <div id="alert-priority-fill" class="alert-priority-fill"></div>
                     </div>
-                    <div class="alert-priority-scale">
-                      <strong id="alert-priority-level">高</strong>
-                      <span>低</span>
-                    </div>
+                    <div id="alert-priority-stats" class="alert-priority-stats"></div>
                   </div>
                 </div>
                 <div id="alert-intent-cards" class="alert-intent-cards"></div>

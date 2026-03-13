@@ -133,6 +133,9 @@ const alertConditionResetBtn = $('alert-condition-reset-btn');
 const alertFilterChips = $('alert-filter-chips');
 const alertPriorityFill = $('alert-priority-fill');
 const alertPriorityLevel = $('alert-priority-level');
+const alertPriorityScoreText = $('alert-priority-score-text');
+const alertPriorityNote = $('alert-priority-note');
+const alertPriorityStats = $('alert-priority-stats');
 const alertIntentCards = $('alert-intent-cards');
 const rawAlertSrcInput = $('raw-alert-src-filter');
 const rawAlertDstInput = $('raw-alert-dst-filter');
@@ -1155,31 +1158,87 @@ function renderAlertAnalysisBoard(alerts, total) {
   alertPriorityFill.style.width = `${width}%`;
   alertPriorityFill.className = `alert-priority-fill ${summary.priorityClass}`;
   alertPriorityLevel.textContent = summary.priorityLabel;
+  if (alertPriorityScoreText) {
+    alertPriorityScoreText.textContent = `关注指数 ${summary.priorityScore} / 100`;
+  }
+  if (alertPriorityNote) {
+    alertPriorityNote.textContent = summary.priorityNote;
+  }
+  if (alertPriorityStats) {
+    alertPriorityStats.innerHTML = [
+      { label: '当前页', value: `${summary.totalAlerts} 条` },
+      { label: '高危告警', value: `${summary.severeCount} 条` },
+      { label: '成功事件', value: `${summary.successCount} 条` },
+      { label: '主类占比', value: summary.dominantCard ? `${summary.dominantCard.label} ${summary.dominantShare}%` : '暂无' },
+    ].map((item) => `
+      <div class="alert-priority-stat">
+        <span>${escapeHTML(item.label)}</span>
+        <strong>${escapeHTML(item.value)}</strong>
+      </div>
+    `).join('');
+  }
   const groups = [
     { key: '人工渗透', tone: 'red' },
     { key: '程序自动化', tone: 'orange' },
     { key: '业务风险', tone: 'yellow' },
     { key: '未定性威胁', tone: 'slate' },
   ];
-  alertIntentCards.innerHTML = groups.map((group) => {
-    const cards = summary.cards.filter((card) => card.group === group.key);
-    return `
+  const visibleGroups = groups.map((group) => {
+    const cards = summary.cards
+      .filter((card) => card.group === group.key && card.count > 0)
+      .sort((left, right) => right.count - left.count)
+      .map((card) => ({
+        ...card,
+        share: summary.totalAlerts ? Math.round((card.count / summary.totalAlerts) * 100) : 0,
+      }));
+    const totalCount = cards.reduce((sum, card) => sum + card.count, 0);
+    return {
+      ...group,
+      cards,
+      totalCount,
+      share: summary.totalAlerts ? Math.round((totalCount / summary.totalAlerts) * 100) : 0,
+      dominant: summary.dominantCard ? summary.dominantCard.group === group.key : false,
+    };
+  }).filter((group) => group.cards.length > 0)
+    .sort((left, right) => right.totalCount - left.totalCount);
+  if (!alerts.length || !visibleGroups.length) {
+    alertIntentCards.innerHTML = `
+      <section class="alert-analysis-empty">
+        <strong>当前页暂无可分析告警</strong>
+        <span>当筛选结果返回数据后，这里会自动按攻击性质收敛为紧凑卡片，并支持点击分类回填筛选。</span>
+      </section>
+    `;
+  } else {
+    alertIntentCards.innerHTML = visibleGroups.map((group) => `
       <section class="intent-lane intent-lane-${group.tone}">
         <div class="intent-lane-head">
-          <span class="intent-lane-title">${escapeHTML(group.key)}</span>
+          <div class="intent-lane-meta">
+            <div class="intent-lane-headline">
+              <span class="intent-lane-title">${escapeHTML(group.key)}</span>
+              ${group.dominant ? '<span class="intent-lane-badge">首要关注</span>' : ''}
+            </div>
+            <span class="intent-lane-total">${group.totalCount} 条告警 · 占当前页 ${group.share}%</span>
+            <div class="intent-lane-meter"><span style="width:${Math.max(group.share, 8)}%"></span></div>
+          </div>
         </div>
         <div class="intent-lane-track">
-          ${cards.map((card) => `
-            <button type="button" class="intent-card intent-card-${card.tone} ${card.active ? 'active' : ''}" data-intent-filter="${escapeHTML(card.filter || '')}">
-              <span class="intent-card-type">${escapeHTML(card.label)}</span>
-              <strong>${card.count}</strong>
+          ${group.cards.map((card) => `
+            <button type="button" class="intent-card intent-card-${card.tone} active" data-intent-filter="${escapeHTML(card.filter || '')}">
+              <div class="intent-card-top">
+                <span class="intent-card-type">${escapeHTML(card.label)}</span>
+                <strong>${card.count}</strong>
+              </div>
+              <div class="intent-card-meta">
+                <span>占比 ${card.share}%</span>
+                <span>${card.filter ? '点击筛选该类' : '当前兜底分类'}</span>
+              </div>
               <small>${escapeHTML(card.desc)}</small>
             </button>
           `).join('')}
         </div>
       </section>
-    `;
-  }).join('');
+    `).join('');
+  }
   document.querySelectorAll('[data-intent-filter]').forEach((button) => button.addEventListener('click', async () => {
     const filter = button.dataset.intentFilter || '';
     alertCategoryInput.value = filter;
@@ -1221,7 +1280,30 @@ function buildAlertAnalysisSummary(alerts) {
     ...item,
     active: item.count > 0,
   }));
-  return { priorityScore, priorityLabel, priorityClass, cards };
+  const activeBucketCount = cards.filter((item) => item.count > 0).length;
+  const dominantCard = cards.reduce((best, item) => (!best || item.count > best.count ? item : best), null);
+  const dominantShare = alerts.length && dominantCard && dominantCard.count > 0
+    ? Math.round((dominantCard.count / alerts.length) * 100)
+    : 0;
+  const priorityNote = !alerts.length
+    ? '当前筛选暂无结果，面板已切换为轻量摘要。'
+    : dominantCard && dominantCard.count > 0
+      ? `当前结果主要集中在 ${dominantCard.group} · ${dominantCard.label}，建议先从这类告警开始处置。`
+      : '当前结果较分散，建议按风险分和攻击结果优先值守。';
+  return {
+    priorityScore,
+    priorityLabel,
+    priorityClass,
+    cards,
+    totalAlerts: alerts.length,
+    highestRisk,
+    successCount,
+    severeCount,
+    activeBucketCount,
+    dominantCard: dominantCard && dominantCard.count > 0 ? dominantCard : null,
+    dominantShare,
+    priorityNote,
+  };
 }
 
 function classifyAlertIntent(alert) {
