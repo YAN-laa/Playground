@@ -1338,6 +1338,11 @@ func (s *PostgresStore) ListAlerts(ctx context.Context, query shared.AlertQuery)
 		args = append(args, query.Since)
 		idx++
 	}
+	if len(query.AllowedProbeIDs) > 0 {
+		sql += fmt.Sprintf(" and exists (select 1 from jsonb_array_elements_text(probe_ids) as probe_id(value) where probe_id.value = any($%d::text[]))", idx)
+		args = append(args, query.AllowedProbeIDs)
+		idx++
+	}
 	predicates := make([]string, 0, len(query.EffectiveConditions()))
 	for _, condition := range query.EffectiveConditions() {
 		predicate, predicateArgs, ok := buildAlertPredicate(condition, idx)

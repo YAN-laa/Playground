@@ -674,6 +674,9 @@ func (s *MemoryStore) ListAlerts(_ context.Context, query shared.AlertQuery) ([]
 		if !query.Since.IsZero() && alert.LastSeenAt.Before(query.Since) {
 			continue
 		}
+		if len(query.AllowedProbeIDs) > 0 && !hasAnyString(alert.ProbeIDs, query.AllowedProbeIDs) {
+			continue
+		}
 		if !matchAlertQuery(alert, query) {
 			continue
 		}
@@ -708,6 +711,15 @@ func matchAlertQuery(alert shared.Alert, query shared.AlertQuery) bool {
 		}
 	}
 	return true
+}
+
+func hasAnyString(values, allowed []string) bool {
+	for _, value := range values {
+		if containsString(allowed, value) {
+			return true
+		}
+	}
+	return false
 }
 
 func matchSingleAlertCondition(alert shared.Alert, condition shared.AlertCondition) bool {

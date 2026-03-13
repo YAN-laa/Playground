@@ -20,6 +20,8 @@ const state = {
   ticketPageSize: 10,
   rawAlertPageSize: 20,
   exportRefreshTimer: null,
+  alertRefreshTimer: null,
+  alertLastRefreshAt: null,
 };
 
 const STORAGE_KEYS = {
@@ -108,6 +110,9 @@ const tenantInput = $('tenant-filter');
 const alertSortByInput = $('alert-sort-by');
 const alertSortOrderInput = $('alert-sort-order');
 const alertPageSizeInput = $('alert-page-size');
+const alertAutoRefreshInput = $('alert-auto-refresh-interval');
+const alertRefreshNowBtn = $('alert-refresh-now-btn');
+const alertAutoRefreshStatus = $('alert-auto-refresh-status');
 const alertsPageJumpInput = $('alerts-page-jump');
 const alertsTotalInfo = $('alerts-total-info');
 const alertConditionLogicInput = $('alert-condition-logic');
@@ -217,7 +222,6 @@ const ALERT_CONDITION_FIELDS = {
 };
 
 $('login-form').addEventListener('submit', onLogin);
-$('refresh-btn').addEventListener('click', refreshCurrentPage);
 $('logout-btn').addEventListener('click', logout);
 $('ack-alert-btn').addEventListener('click', () => updateSelectedAlert('ack'));
 $('close-alert-btn').addEventListener('click', () => updateSelectedAlert('closed'));
@@ -262,6 +266,8 @@ $('refresh-query-stats-btn').addEventListener('click', async () => loadQueryStat
 alertConditionFieldInput.addEventListener('change', () => renderAlertConditionInput());
 alertConditionAddBtn.addEventListener('click', async () => applyAlertConditionFromBuilder());
 alertConditionResetBtn.addEventListener('click', async () => clearAllAlertConditions());
+alertAutoRefreshInput.addEventListener('change', async () => handleAlertAutoRefreshChange());
+alertRefreshNowBtn.addEventListener('click', async () => refreshAlertsNow());
 backToAlertsBtn.addEventListener('click', async () => {
   await navigate('alerts');
 });
@@ -344,6 +350,7 @@ async function onLogin(event) {
 }
 
 function logout() {
+  stopAlertAutoRefresh();
   stopExportAutoRefresh();
   state.token = '';
   state.user = null;
@@ -356,6 +363,7 @@ function logout() {
 async function afterLogin() {
   restoreFilters();
   renderAlertConditionInput();
+  renderAlertAutoRefreshStatus();
   await loadRoleTemplates();
   tenantInput.value = state.user.tenant_id;
   state.alertPageSize = Number(alertPageSizeInput.value || 10);
@@ -542,6 +550,7 @@ async function applyRouteFromLocation(fallbackToDefault = false) {
 }
 
 async function applyRoute(route) {
+  stopAlertAutoRefresh();
   stopExportAutoRefresh();
   state.currentRoute = route;
   state.currentPage = route.page;
@@ -577,6 +586,9 @@ async function applyRoute(route) {
     startExportAutoRefresh();
   }
   await refreshCurrentPage();
+  if (route.page === 'alerts') {
+    startAlertAutoRefresh();
+  }
 }
 
 function buildHash(path, params) {
@@ -880,6 +892,8 @@ async function loadAlerts() {
   params.set('page_size', state.alertPageSize);
   const response = await request(`/api/v1/alerts?${params.toString()}`);
   persistAlertFilters();
+  state.alertLastRefreshAt = Date.now();
+  renderAlertAutoRefreshStatus();
   const alerts = response.items || [];
   syncSelectedAlerts(alerts);
   $('alerts-body').innerHTML = alerts.map((alert) => `
@@ -891,7 +905,7 @@ async function loadAlerts() {
       </td>
       <td><span class="tag tag-warm">${alert.category || '未分类'}</span></td>
       <td>
-        <div class="cell-primary">${alert.signature}</div>
+        <div class="cell-primary">${formatAlertDisplayName(alert.signature)}</div>
         <div class="cell-sub">SID ${alert.signature_id || '-'} · 协议 ${alert.proto || '-'}</div>
       </td>
       <td><span class="severity-badge ${formatSeverityClass(alert.severity)}">${formatSeverity(alert.severity)}</span></td>
@@ -932,9 +946,16 @@ async function loadAlerts() {
   }));
   updateSelectAllState(alerts);
   const total = response.total || 0;
-  const pages = Math.max(1, Math.ceil(total / (response.page_size || state.alertPageSize)));
-  $('alerts-page-info').textContent = `第 ${response.page || 1} 页 / 共 ${pages} 页`;
-  alertsTotalInfo.textContent = `共 ${total} 条告警`;
+  const page = response.page || 1;
+  const pageSize = response.page_size || state.alertPageSize;
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const start = total > 0 && alerts.length > 0 ? (page - 1) * pageSize + 1 : 0;
+  const end = total > 0 && alerts.length > 0 ? start + alerts.length - 1 : 0;
+  $('alerts-page-info').textContent = `第 ${page} / ${pages} 页`;
+  alertsPageJumpInput.max = String(pages);
+  alertsTotalInfo.textContent = total > 0
+    ? `共 ${total} 条告警 · 当前显示 ${start}-${end} 条`
+    : '共 0 条告警';
   renderAlertFilterChips();
 }
 
@@ -1066,6 +1087,84 @@ function formatAlertConditionValue(condition) {
     default:
       return value;
   }
+}
+
+function formatAlertRefreshInterval(seconds) {
+  if (seconds <= 0) return '关闭';
+  if (seconds < 60) return `${seconds} 秒`;
+  if (seconds === 60) return '1 分钟';
+  return `${Math.round(seconds / 60)} 分钟`;
+}
+
+function formatAlertDisplayName(value) {
+  const original = String(value || '').trim();
+  if (!original) return '';
+  let cleaned = original;
+  const prefixPatterns = [
+    /^suricata\s*[:：]\s*/i,
+    /^ET\b[^:：]{0,120}[:：]\s*/i,
+  ];
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const pattern of prefixPatterns) {
+      const next = cleaned.replace(pattern, '').trim();
+      if (next !== cleaned) {
+        cleaned = next;
+        changed = true;
+      }
+    }
+  }
+  return cleaned || original;
+}
+
+function renderAlertAutoRefreshStatus() {
+  if (!alertAutoRefreshStatus || !alertAutoRefreshInput) return;
+  const seconds = Number(alertAutoRefreshInput.value || 0);
+  if (seconds <= 0) {
+    alertAutoRefreshStatus.textContent = '自动刷新已关闭';
+    return;
+  }
+  const lastRefresh = state.alertLastRefreshAt
+    ? ` · 上次 ${new Date(state.alertLastRefreshAt).toLocaleTimeString('zh-CN', { hour12: false })}`
+    : '';
+  alertAutoRefreshStatus.textContent = `每 ${formatAlertRefreshInterval(seconds)} 自动刷新${lastRefresh}`;
+}
+
+function stopAlertAutoRefresh() {
+  if (state.alertRefreshTimer) {
+    window.clearInterval(state.alertRefreshTimer);
+    state.alertRefreshTimer = null;
+  }
+}
+
+function startAlertAutoRefresh() {
+  stopAlertAutoRefresh();
+  renderAlertAutoRefreshStatus();
+  const seconds = Number(alertAutoRefreshInput?.value || 0);
+  if (state.currentPage !== 'alerts' || seconds <= 0) {
+    return;
+  }
+  state.alertRefreshTimer = window.setInterval(async () => {
+    if (state.currentPage !== 'alerts') return;
+    await loadAlerts();
+  }, seconds * 1000);
+}
+
+async function handleAlertAutoRefreshChange() {
+  persistAlertFilters();
+  state.alertLastRefreshAt = null;
+  renderAlertAutoRefreshStatus();
+  if (state.currentPage === 'alerts') {
+    await loadAlerts();
+    startAlertAutoRefresh();
+  }
+}
+
+async function refreshAlertsNow() {
+  state.alertLastRefreshAt = null;
+  await loadAlerts();
+  startAlertAutoRefresh();
 }
 
 async function loadRawAlerts() {
@@ -1616,16 +1715,10 @@ function renderAlertSimilarTab(detail) {
   return `
     <div class="detail-tab-grid">
       <section class="detail-tab-section">
-        <h3>同源关系</h3>
-        <p class="cell-sub">围绕当前源地址查看它在当前攻击窗口内影响了哪些目标和探针。</p>
-        <div class="relation-entry-grid">
+        <h3>关联关系</h3>
+        <p class="cell-sub">围绕当前源地址和目标地址，查看关联节点、累计命中、涉及探针和最近活动。</p>
+        <div class="relation-entry-grid relation-entry-grid-dual">
           ${renderRelationEntryCard(detail, 'source')}
-        </div>
-      </section>
-      <section class="detail-tab-section">
-        <h3>同目标关系</h3>
-        <p class="cell-sub">围绕当前目标地址查看有哪些源在当前攻击窗口内持续命中它。</p>
-        <div class="relation-entry-grid">
           ${renderRelationEntryCard(detail, 'target')}
         </div>
       </section>
@@ -1977,6 +2070,7 @@ function renderAlertRelationPage(detail, graph, relation) {
           <div class="detail-subtitle">${relationLabel}分析视角</div>
           <strong>${relation === 'target' ? '谁在持续命中这个目标' : '这个攻击源打到了哪些目标'}</strong>
           <div class="cell-sub">${escapeHTML(graph.description)}</div>
+          <div class="cell-sub">攻击结果：成功 ${graph.resultStats.success} / 失败 ${graph.resultStats.failed} / 尝试 ${graph.resultStats.attempted} / 未知 ${graph.resultStats.unknown}</div>
         </div>
         <div class="detail-actions">
           <button class="ghost" type="button" data-relation-node-filter="${relation === 'target' ? 'target' : 'source'}" data-node-value="${escapeHTML(graph.center.value)}">
@@ -1985,62 +2079,86 @@ function renderAlertRelationPage(detail, graph, relation) {
         </div>
       </div>
       ${renderRelationGraph(graph)}
+      <div class="detail-split-grid relation-detail-grid">
+        <section class="detail-tab-section">
+          <h3>关系明细</h3>
+          ${renderRelationPeerList(graph)}
+        </section>
+        <section class="detail-tab-section">
+          <h3>活动时间线</h3>
+          ${renderTimelineFilterPanel(graph.timeline || [], relation, `relation-${relation}`)}
+        </section>
+      </div>
+      <section class="detail-tab-section">
+        <h3>关联聚合告警</h3>
+        ${renderRelationAlertList(graph)}
+      </section>
     </div>
   `;
 }
 
 function buildAlertRelationGraph(detail, relation) {
   const timeline = relation === 'target' ? (detail.same_target_timeline || []) : (detail.same_source_timeline || []);
+  const alerts = getRelationAlerts(detail, relation)
+    .slice()
+    .sort((left, right) => new Date(right.last_seen_at).getTime() - new Date(left.last_seen_at).getTime());
   const centerValue = relation === 'target' ? (detail.alert.dst_ip || '未知目标') : (detail.alert.src_ip || '未知源地址');
   const centerDesc = relation === 'target'
     ? `目标资产 ${detail.alert.target_asset_name || detail.alert.dst_ip || '-'}`
     : `攻击源 ${detail.alert.src_ip || '-'}`;
   const nodeMap = new Map();
   const probeSet = new Set();
-  const assetSet = new Set();
   const resultStats = { success: 0, failed: 0, attempted: 0, unknown: 0 };
-  for (const item of timeline) {
-    const nodeValue = relation === 'target' ? (item.src_ip || '未知源地址') : (item.dst_ip || '未知目标');
+  let totalEvents = 0;
+  for (const alert of alerts) {
+    const nodeValue = relation === 'target' ? (alert.src_ip || '未知源地址') : (alert.dst_ip || '未知目标');
+    const eventCount = Math.max(Number(alert.event_count || 0), 1);
+    const result = normalizeAlertAttackResult(alert.attack_result);
     const existing = nodeMap.get(nodeValue) || {
       value: nodeValue,
-      count: 0,
+      alertCount: 0,
+      eventCount: 0,
       probes: new Set(),
+      signatures: new Set(),
       results: { success: 0, failed: 0, attempted: 0, unknown: 0 },
       latestAt: '',
+      assetName: '',
     };
-    existing.count += 1;
-    if (item.probe_id) {
-      existing.probes.add(item.probe_id);
-      probeSet.add(item.probe_id);
+    existing.alertCount += 1;
+    existing.eventCount += eventCount;
+    for (const probeID of alert.probe_ids || []) {
+      existing.probes.add(probeID);
+      probeSet.add(probeID);
     }
-    const result = String(item.attack_result || 'unknown').toLowerCase();
-    if (existing.results[result] !== undefined) {
-      existing.results[result] += 1;
-    } else {
-      existing.results.unknown += 1;
+    if (alert.signature) {
+      existing.signatures.add(alert.signature);
     }
-    if (resultStats[result] !== undefined) {
-      resultStats[result] += 1;
-    } else {
-      resultStats.unknown += 1;
+    existing.results[result] += eventCount;
+    resultStats[result] += eventCount;
+    totalEvents += eventCount;
+    const assetName = relation === 'target'
+      ? (alert.source_asset_name || '')
+      : (alert.target_asset_name || '');
+    if (!existing.assetName && assetName) {
+      existing.assetName = assetName;
     }
-    if (nodeValue) {
-      assetSet.add(nodeValue);
-    }
-    if (!existing.latestAt || new Date(item.timestamp).getTime() > new Date(existing.latestAt).getTime()) {
-      existing.latestAt = item.timestamp;
+    if (!existing.latestAt || new Date(alert.last_seen_at).getTime() > new Date(existing.latestAt).getTime()) {
+      existing.latestAt = alert.last_seen_at;
     }
     nodeMap.set(nodeValue, existing);
   }
   const sortedNodes = Array.from(nodeMap.values())
-    .sort((left, right) => right.count - left.count || new Date(right.latestAt).getTime() - new Date(left.latestAt).getTime());
+    .sort((left, right) => right.eventCount - left.eventCount || new Date(right.latestAt).getTime() - new Date(left.latestAt).getTime());
   const nodes = sortedNodes
     .slice(0, 10)
     .map((item) => ({
       value: item.value,
-      count: item.count,
+      alertCount: item.alertCount,
+      eventCount: item.eventCount,
       probeCount: item.probes.size,
       latestAt: item.latestAt,
+      assetName: item.assetName,
+      signatures: Array.from(item.signatures),
       dominantResult: dominantAttackResult(item.results),
       success: item.results.success,
       failed: item.results.failed,
@@ -2051,9 +2169,12 @@ function buildAlertRelationGraph(detail, relation) {
   if (overflow > 0) {
     nodes.push({
       value: `其他 ${overflow} 个节点`,
-      count: sortedNodes.slice(10).reduce((sum, item) => sum + item.count, 0),
+      alertCount: sortedNodes.slice(10).reduce((sum, item) => sum + item.alertCount, 0),
+      eventCount: sortedNodes.slice(10).reduce((sum, item) => sum + item.eventCount, 0),
       probeCount: 0,
       latestAt: '',
+      assetName: '',
+      signatures: [],
       dominantResult: 'unknown',
       success: 0,
       failed: 0,
@@ -2062,18 +2183,36 @@ function buildAlertRelationGraph(detail, relation) {
       aggregate: true,
     });
   }
+  const peers = sortedNodes.map((item) => ({
+    value: item.value,
+    alertCount: item.alertCount,
+    eventCount: item.eventCount,
+    probeCount: item.probes.size,
+    latestAt: item.latestAt,
+    assetName: item.assetName,
+    signatures: Array.from(item.signatures),
+    dominantResult: dominantAttackResult(item.results),
+    success: item.results.success,
+    failed: item.results.failed,
+    attempted: item.results.attempted,
+    unknown: item.results.unknown,
+  }));
   return {
     relation,
     center: { value: centerValue, desc: centerDesc },
+    timeline,
+    alerts,
+    peers,
     nodes,
     description: relation === 'target'
-      ? `共 ${nodeMap.size} 个源地址在当前窗口内命中过目标 ${centerValue}。`
-      : `共 ${nodeMap.size} 个目标地址在当前窗口内被源地址 ${centerValue} 命中。`,
+      ? `共有 ${nodeMap.size} 个源地址在当前窗口内持续命中目标 ${centerValue}，累计命中 ${totalEvents} 次。`
+      : `源地址 ${centerValue} 在当前窗口内共影响 ${nodeMap.size} 个目标，累计命中 ${totalEvents} 次。`,
+    resultStats,
     summary: [
-      { label: relation === 'target' ? '攻击源数' : '影响目标数', value: String(assetSet.size) },
+      { label: relation === 'target' ? '攻击源数' : '影响目标数', value: String(nodeMap.size) },
+      { label: '关联告警数', value: String(alerts.length) },
+      { label: '累计命中数', value: String(totalEvents) },
       { label: '涉及探针数', value: String(probeSet.size) },
-      { label: '成功 / 失败', value: `${resultStats.success} / ${resultStats.failed}` },
-      { label: '尝试 / 未知', value: `${resultStats.attempted} / ${resultStats.unknown}` },
     ],
   };
 }
@@ -2100,7 +2239,7 @@ function renderRelationGraph(graph) {
         <svg class="relation-graph-lines" viewBox="0 0 ${stageWidth} ${stageHeight}" aria-hidden="true">
           ${outer.map((node) => `
             <line x1="${centerX}" y1="${centerY}" x2="${node.x}" y2="${node.y}" class="relation-edge"></line>
-            <text x="${(centerX + node.x) / 2}" y="${(centerY + node.y) / 2 - 8}" class="relation-edge-label">${node.count} 次</text>
+            <text x="${(centerX + node.x) / 2}" y="${(centerY + node.y) / 2 - 8}" class="relation-edge-label">${node.eventCount} 次</text>
           `).join('')}
         </svg>
         <div class="relation-node relation-node-center" style="left:${centerX}px; top:${centerY}px;">
@@ -2117,11 +2256,104 @@ function renderRelationGraph(graph) {
           >
             <span class="status-pill ${formatAttackResultClass(node.dominantResult)}">${formatAttackResult(node.dominantResult)}</span>
             <strong>${escapeHTML(node.value)}</strong>
-            <span>${node.count} 次命中 · ${node.probeCount || 0} 个探针</span>
+            <span>${node.alertCount || 0} 条告警 · ${node.eventCount || 0} 次命中</span>
+            ${node.aggregate ? '' : `<span>${escapeHTML(node.assetName || '未识别资产')} · ${node.probeCount || 0} 个探针</span>`}
             ${node.aggregate ? '' : `<span>成功 ${node.success} / 失败 ${node.failed} / 尝试 ${node.attempted}</span>`}
           </button>
         `).join('')}
       </div>
+    </div>
+  `;
+}
+
+function getRelationAlerts(detail, relation) {
+  const related = relation === 'target' ? (detail.similar_target_alerts || []) : (detail.similar_source_alerts || []);
+  const out = [];
+  const seen = new Set();
+  [detail.alert, ...related].forEach((alert) => {
+    if (!alert?.id || seen.has(alert.id)) {
+      return;
+    }
+    seen.add(alert.id);
+    out.push(alert);
+  });
+  return out;
+}
+
+function normalizeAlertAttackResult(value) {
+  const key = String(value || 'unknown').toLowerCase();
+  return ['success', 'failed', 'attempted', 'unknown'].includes(key) ? key : 'unknown';
+}
+
+function renderRelationPeerList(graph) {
+  if (!graph.peers?.length) {
+    return '<div class="detail-empty">暂无可展开的关系节点。</div>';
+  }
+  return `
+    <div class="relation-peer-list">
+      ${graph.peers.map((peer) => `
+        <article class="relation-peer-card">
+          <div class="relation-peer-head">
+            <div>
+              <strong>${escapeHTML(peer.value)}</strong>
+              <div class="cell-sub">${escapeHTML(peer.assetName || (graph.relation === 'target' ? '来源资产未识别' : '目标资产未识别'))}</div>
+            </div>
+            <button
+              type="button"
+              class="ghost compact-icon-btn"
+              data-relation-node-filter="${graph.relation === 'target' ? 'source' : 'target'}"
+              data-node-value="${escapeHTML(peer.value)}"
+            >
+              联查
+            </button>
+          </div>
+          <div class="relation-peer-metrics">
+            <span>聚合告警 ${peer.alertCount}</span>
+            <span>累计命中 ${peer.eventCount}</span>
+            <span>涉及探针 ${peer.probeCount}</span>
+            <span>最近 ${formatDateTime(peer.latestAt)}</span>
+          </div>
+          <div class="cell-sub">
+            攻击结果：成功 ${peer.success} / 失败 ${peer.failed} / 尝试 ${peer.attempted} / 未知 ${peer.unknown}
+          </div>
+          <div class="cell-sub">
+            命中规则：${escapeHTML((peer.signatures || []).slice(0, 3).join('、') || '暂无')}
+          </div>
+        </article>
+      `).join('')}
+    </div>
+  `;
+}
+
+function renderRelationAlertList(graph) {
+  if (!graph.alerts?.length) {
+    return '<div class="detail-empty">暂无关联聚合告警。</div>';
+  }
+  return `
+    <div class="relation-alert-list">
+      ${graph.alerts.map((alert) => {
+        const peerValue = graph.relation === 'target' ? (alert.src_ip || '-') : (alert.dst_ip || '-');
+        const peerAsset = graph.relation === 'target'
+          ? (alert.source_asset_name || '来源资产未识别')
+          : (alert.target_asset_name || '目标资产未识别');
+        return `
+          <article class="relation-alert-card">
+            <div class="relation-alert-head">
+              <div>
+                <strong>${escapeHTML(alert.signature || '-')}</strong>
+                <div class="cell-sub">${escapeHTML(peerValue)} · ${escapeHTML(peerAsset)}</div>
+              </div>
+              <a class="ghost link-button" href="#/alerts/${encodeURIComponent(alert.id)}">查看告警</a>
+            </div>
+            <div class="relation-peer-metrics">
+              <span>${formatSeverity(alert.severity)}</span>
+              <span>${formatAttackResult(alert.attack_result)}</span>
+              <span>命中 ${alert.event_count || 0} 次</span>
+              <span>最近 ${formatDateTime(alert.last_seen_at)}</span>
+            </div>
+          </article>
+        `;
+      }).join('')}
     </div>
   `;
 }
@@ -2235,7 +2467,7 @@ function extractPrimaryDNSExchange(detail) {
 
 function renderRelationEntryCard(detail, relation) {
   const isSource = relation === 'source';
-  const stats = summarizeTimeline(isSource ? (detail.same_source_timeline || []) : (detail.same_target_timeline || []), relation);
+  const graph = buildAlertRelationGraph(detail, relation);
   const title = isSource ? '同源关系图' : '同目标关系图';
   const desc = isSource
     ? `围绕源地址 ${detail.alert.src_ip || '-'} 查看其在当前攻击窗口内打到哪些目标。`
@@ -2248,14 +2480,22 @@ function renderRelationEntryCard(detail, relation) {
       </div>
       <p>${escapeHTML(desc)}</p>
       <div class="relation-entry-stats">
-        ${stats.map((item) => `
+        ${graph.summary.map((item) => `
           <div class="relation-mini-stat">
             <span>${escapeHTML(item.label)}</span>
             <strong>${escapeHTML(item.value)}</strong>
           </div>
         `).join('')}
       </div>
-      <span class="relation-entry-link">点击查看动态关系图</span>
+      <div class="relation-peer-preview">
+        ${(graph.peers || []).slice(0, 3).map((peer) => `
+          <span class="relation-peer-pill">
+            <strong>${escapeHTML(peer.value)}</strong>
+            <span>${peer.eventCount} 次</span>
+          </span>
+        `).join('') || '<span class="relation-peer-pill empty">暂无更多关联节点</span>'}
+      </div>
+      <span class="relation-entry-link">点击查看关系图与明细</span>
     </button>
   `;
 }
@@ -2292,7 +2532,6 @@ function extractPrimaryAlertMetadata(detail) {
 
 function renderTimelinePanel(items, relation) {
   const stats = summarizeTimeline(items, relation);
-  const scope = `timeline-${relation}`;
   return `
     <div class="timeline-summary-grid">
       ${stats.map((item) => `
@@ -2302,6 +2541,12 @@ function renderTimelinePanel(items, relation) {
         </article>
       `).join('')}
     </div>
+    ${renderTimelineFilterPanel(items, relation, `timeline-${relation}`)}
+  `;
+}
+
+function renderTimelineFilterPanel(items, relation, scope) {
+  return `
     <div class="detail-actions timeline-filters">
       <button class="ghost active" type="button" data-timeline-filter="${scope}" data-kind="all">全部</button>
       <button class="ghost" type="button" data-timeline-filter="${scope}" data-kind="aggregate">告警</button>
@@ -2800,6 +3045,7 @@ function persistAlertFilters() {
   localStorage.setItem(STORAGE_KEYS.alerts, JSON.stringify({
     matchMode: alertConditionLogicInput.value,
     conditions: state.alertConditions || [],
+    autoRefreshSeconds: alertAutoRefreshInput.value,
     sortBy: alertSortByInput.value,
     sortOrder: alertSortOrderInput.value,
     pageSize: alertPageSizeInput.value,
@@ -2855,6 +3101,7 @@ function persistQueryStatsFilters() {
 function restoreFilters() {
   restoreObject(STORAGE_KEYS.alerts, (value) => {
     alertConditionLogicInput.value = value.matchMode || 'all';
+    alertAutoRefreshInput.value = value.autoRefreshSeconds || '0';
     state.alertConditions = normalizeAlertConditions(Array.isArray(value.conditions) ? value.conditions : [
       value.src ? { field: 'src_ip', value: value.src } : null,
       value.dst ? { field: 'dst_ip', value: value.dst } : null,

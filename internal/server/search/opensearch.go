@@ -364,6 +364,18 @@ func buildAlertSearchQuery(query shared.AlertQuery) map[string]any {
 			},
 		})
 	}
+	if len(query.AllowedProbeIDs) > 0 {
+		should := make([]map[string]any, 0, len(query.AllowedProbeIDs))
+		for _, id := range query.AllowedProbeIDs {
+			should = append(should, map[string]any{"term": map[string]any{"probe_ids.keyword": id}})
+		}
+		filters = append(filters, map[string]any{
+			"bool": map[string]any{
+				"should":               should,
+				"minimum_should_match": 1,
+			},
+		})
+	}
 	conditions := buildAlertConditionClauses(query)
 	boolQuery := map[string]any{
 		"filter": filters,

@@ -385,6 +385,20 @@ func (s *Service) GetAlertDetail(ctx context.Context, id string) (shared.AlertDe
 	if err != nil {
 		return shared.AlertDetail{}, false, err
 	}
+	relationRawEvents := rawEvents
+	if len(similarSource) > 0 || len(similarTarget) > 0 {
+		relationProbeIDs := uniqueStrings(append(
+			append(append([]string{}, alert.ProbeIDs...), collectAlertProbeIDs(similarSource)...),
+			collectAlertProbeIDs(similarTarget)...,
+		))
+		if len(relationProbeIDs) > 0 {
+			relatedEvents, err := s.store.ListRawEvents(ctx, alert.TenantID, since, until, relationProbeIDs)
+			if err != nil {
+				return shared.AlertDetail{}, false, err
+			}
+			relationRawEvents = relatedEvents
+		}
+	}
 	decisionBasis := buildAlertDecisionBasis(alert, events, contextEvents)
 	alert.AttackResult = decisionBasis.AttackResult
 	packetEvidence := buildPacketEvidence(events, contextEvents)
@@ -397,8 +411,8 @@ func (s *Service) GetAlertDetail(ctx context.Context, id string) (shared.AlertDe
 		Activities:          activities,
 		DecisionBasis:       decisionBasis,
 		PacketEvidence:      packetEvidence,
-		SameSourceTimeline:  limitTimelineItems(buildRelatedAlertTimeline("source", alert, append([]shared.Alert{alert}, similarSource...), rawEvents), 30),
-		SameTargetTimeline:  limitTimelineItems(buildRelatedAlertTimeline("target", alert, append([]shared.Alert{alert}, similarTarget...), rawEvents), 30),
+		SameSourceTimeline:  limitTimelineItems(buildRelatedAlertTimeline("source", alert, append([]shared.Alert{alert}, similarSource...), relationRawEvents), 30),
+		SameTargetTimeline:  limitTimelineItems(buildRelatedAlertTimeline("target", alert, append([]shared.Alert{alert}, similarTarget...), relationRawEvents), 30),
 		SameFlowTimeline:    limitTimelineItems(buildFlowTimeline(events, contextEvents), 40),
 		SimilarSourceAlerts: similarSource,
 		SimilarTargetAlerts: similarTarget,
@@ -418,6 +432,9 @@ func (s *Service) SearchAlerts(ctx context.Context, query shared.AlertQuery) (sh
 }
 
 func (s *Service) SearchAlertsForUser(ctx context.Context, user shared.User, query shared.AlertQuery) (shared.AlertListResponse, error) {
+	if len(user.AllowedProbeIDs) > 0 && !containsString(user.Permissions, "*") {
+		query.AllowedProbeIDs = uniqueStrings(user.AllowedProbeIDs)
+	}
 	if len(user.AllowedAssetIDs) > 0 || len(user.AllowedOrgIDs) > 0 {
 		assetIDs, _, err := s.resolveScopeAssets(ctx, user, query.TenantID)
 		if err != nil {
@@ -429,15 +446,6 @@ func (s *Service) SearchAlertsForUser(ctx context.Context, user shared.User, que
 	if err != nil {
 		return shared.AlertListResponse{}, err
 	}
-	filtered := make([]shared.Alert, 0, len(result.Items))
-	for _, item := range result.Items {
-		if !s.CanAccessAlert(ctx, user, item) {
-			continue
-		}
-		filtered = append(filtered, item)
-	}
-	result.Items = filtered
-	result.Total = len(filtered)
 	return result, nil
 }
 
@@ -3103,9 +3111,17 @@ func (s *Service) findSimilarAlerts(ctx context.Context, alert shared.Alert, mod
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
-		return out[i].LastSeenAt.Before(out[j].LastSeenAt)
+		return out[i].LastSeenAt.After(out[j].LastSeenAt)
 	})
 	return out, nil
+}
+
+func collectAlertProbeIDs(alerts []shared.Alert) []string {
+	out := make([]string, 0, len(alerts))
+	for _, alert := range alerts {
+		out = append(out, alert.ProbeIDs...)
+	}
+	return out
 }
 
 func buildAlertDecisionBasis(alert shared.Alert, events []shared.RawEvent, contextEvents []shared.RawEvent) shared.AlertDecisionBasis {

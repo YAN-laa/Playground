@@ -952,6 +952,142 @@ func TestAlertListSupportsCompositeConditions(t *testing.T) {
 	}
 }
 
+func TestAlertDetailIncludesRelatedProbeTimeline(t *testing.T) {
+	t.Setenv("APP_EXPORT_DIR", t.TempDir())
+	t.Setenv("APP_ALERT_AGG_WINDOW", "1m")
+	handler, cleanup, err := NewHandler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	var login shared.LoginResponse
+	doJSON(t, handler, "/api/v1/auth/login", http.MethodPost, shared.LoginRequest{
+		TenantID: "demo-tenant",
+		Username: "admin",
+		Password: "admin123",
+	}, &login, http.StatusOK, "")
+	authHeader := "Bearer " + login.Token
+
+	var probeA shared.Probe
+	doJSON(t, handler, "/api/v1/probes/register", http.MethodPost, shared.RegisterProbeRequest{
+		TenantID:    "tenant-relation-detail",
+		ProbeCode:   "probe-relation-a",
+		Name:        "Relation A",
+		Version:     "0.1.0",
+		RuleVersion: "rules-v1",
+	}, &probeA, http.StatusCreated, "")
+
+	var probeB shared.Probe
+	doJSON(t, handler, "/api/v1/probes/register", http.MethodPost, shared.RegisterProbeRequest{
+		TenantID:    "tenant-relation-detail",
+		ProbeCode:   "probe-relation-b",
+		Name:        "Relation B",
+		Version:     "0.1.0",
+		RuleVersion: "rules-v1",
+	}, &probeB, http.StatusCreated, "")
+
+	baseTime := time.Now().UTC().Truncate(time.Minute).Add(-40 * time.Minute)
+	doJSON(t, handler, "/api/v1/events/ingest", http.MethodPost, shared.EventBatch{
+		TenantID: "tenant-relation-detail",
+		ProbeID:  probeA.ID,
+		Events: []shared.SuricataEvent{{
+			Timestamp: baseTime.Format(time.RFC3339),
+			EventType: "alert",
+			SrcIP:     "10.40.0.5",
+			SrcPort:   50000,
+			DstIP:     "192.168.40.10",
+			DstPort:   443,
+			Proto:     "TCP",
+			AppProto:  "http",
+			FlowID:    "relation-flow-a",
+			Alert: &shared.SuricataAlert{
+				SignatureID: 9401,
+				Signature:   "Relation Detail A",
+				Category:    "Web Attack",
+				Severity:    2,
+			},
+		}},
+	}, nil, http.StatusAccepted, "")
+
+	doJSON(t, handler, "/api/v1/events/ingest", http.MethodPost, shared.EventBatch{
+		TenantID: "tenant-relation-detail",
+		ProbeID:  probeB.ID,
+		Events: []shared.SuricataEvent{
+			{
+				Timestamp: baseTime.Add(3 * time.Minute).Format(time.RFC3339),
+				EventType: "alert",
+				SrcIP:     "10.40.0.5",
+				SrcPort:   50010,
+				DstIP:     "192.168.40.11",
+				DstPort:   8443,
+				Proto:     "TCP",
+				AppProto:  "http",
+				FlowID:    "relation-flow-b",
+				Alert: &shared.SuricataAlert{
+					SignatureID: 9402,
+					Signature:   "Relation Detail B",
+					Category:    "Web Attack",
+					Severity:    1,
+				},
+			},
+			{
+				Timestamp: baseTime.Add(3*time.Minute + 10*time.Second).Format(time.RFC3339),
+				EventType: "http",
+				SrcIP:     "10.40.0.5",
+				SrcPort:   50010,
+				DstIP:     "192.168.40.11",
+				DstPort:   8443,
+				Proto:     "TCP",
+				AppProto:  "http",
+				FlowID:    "relation-flow-b",
+				Payload: map[string]any{
+					"http": map[string]any{
+						"hostname": "relation.example",
+						"url":      "/admin",
+						"status":   200,
+					},
+				},
+			},
+		},
+	}, nil, http.StatusAccepted, "")
+
+	var alerts shared.AlertListResponse
+	doJSON(t, handler, "/api/v1/alerts?tenant_id=tenant-relation-detail", http.MethodGet, nil, &alerts, http.StatusOK, authHeader)
+	if len(alerts.Items) != 2 {
+		t.Fatalf("expected 2 alerts for relation detail test, got %d", len(alerts.Items))
+	}
+
+	var current shared.Alert
+	found := false
+	for _, item := range alerts.Items {
+		if item.DstIP == "192.168.40.10" {
+			current = item
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected to find the source anchor alert")
+	}
+
+	var detail shared.AlertDetail
+	doJSON(t, handler, "/api/v1/alerts/"+current.ID+"/detail", http.MethodGet, nil, &detail, http.StatusOK, authHeader)
+	if len(detail.SimilarSourceAlerts) != 1 {
+		t.Fatalf("expected 1 similar source alert, got %d", len(detail.SimilarSourceAlerts))
+	}
+	relatedProtocolSeen := false
+	for _, item := range detail.SameSourceTimeline {
+		if item.ProbeID == probeB.ID && item.EventType == "http" {
+			relatedProtocolSeen = true
+			break
+		}
+	}
+	if !relatedProtocolSeen {
+		t.Fatal("expected same source timeline to include related probe protocol event")
+	}
+}
+
 func TestProbeReconnectReusesExistingProbe(t *testing.T) {
 	t.Setenv("APP_EXPORT_DIR", t.TempDir())
 	handler, cleanup, err := NewHandler()
@@ -1553,6 +1689,109 @@ func TestDataScopeEnforcement(t *testing.T) {
 		t.Fatalf("expected scoped user to see 1 alert, got %d", len(alerts.Items))
 	}
 	doJSON(t, handler, "/api/v1/alerts?tenant_id=demo-tenant", http.MethodGet, nil, nil, http.StatusForbidden, auth)
+}
+
+func TestAlertPaginationTotalForScopedUser(t *testing.T) {
+	handler, cleanup, err := NewHandler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	var admin shared.LoginResponse
+	doJSON(t, handler, "/api/v1/auth/login", http.MethodPost, shared.LoginRequest{
+		TenantID: "demo-tenant",
+		Username: "admin",
+		Password: "admin123",
+	}, &admin, http.StatusOK, "")
+	adminAuth := "Bearer " + admin.Token
+
+	var probe shared.Probe
+	doJSON(t, handler, "/api/v1/probes/register", http.MethodPost, shared.RegisterProbeRequest{
+		TenantID:    "tenant-alert-total",
+		ProbeCode:   "probe-alert-total",
+		Name:        "Alert Total Probe",
+		Version:     "0.1.0",
+		RuleVersion: "rules-v1",
+	}, &probe, http.StatusCreated, "")
+
+	baseTime := time.Now().UTC().Truncate(time.Minute).Add(-20 * time.Minute)
+	doJSON(t, handler, "/api/v1/events/ingest", http.MethodPost, shared.EventBatch{
+		TenantID: "tenant-alert-total",
+		ProbeID:  probe.ID,
+		Events: []shared.SuricataEvent{
+			{
+				Timestamp: baseTime.Format(time.RFC3339),
+				EventType: "alert",
+				SrcIP:     "10.30.0.1",
+				SrcPort:   41000,
+				DstIP:     "192.168.30.10",
+				DstPort:   443,
+				Proto:     "TCP",
+				AppProto:  "http",
+				FlowID:    "scope-total-a",
+				Alert: &shared.SuricataAlert{
+					SignatureID: 9301,
+					Signature:   "Scoped Total Alert A",
+					Category:    "Web Attack",
+					Severity:    2,
+				},
+			},
+			{
+				Timestamp: baseTime.Add(2 * time.Minute).Format(time.RFC3339),
+				EventType: "alert",
+				SrcIP:     "10.30.0.2",
+				SrcPort:   41001,
+				DstIP:     "192.168.30.11",
+				DstPort:   8443,
+				Proto:     "TCP",
+				AppProto:  "http",
+				FlowID:    "scope-total-b",
+				Alert: &shared.SuricataAlert{
+					SignatureID: 9302,
+					Signature:   "Scoped Total Alert B",
+					Category:    "Web Attack",
+					Severity:    1,
+				},
+			},
+		},
+	}, nil, http.StatusAccepted, "")
+
+	var role shared.Role
+	doJSON(t, handler, "/api/v1/roles", http.MethodPost, shared.CreateRoleRequest{
+		TenantID:    "tenant-alert-total",
+		Name:        "alert-total-analyst",
+		Description: "Alert total scoped analyst",
+		Permissions: []string{"alert.read", "probe.read"},
+	}, &role, http.StatusCreated, adminAuth)
+
+	var user shared.User
+	doJSON(t, handler, "/api/v1/users", http.MethodPost, shared.CreateUserRequest{
+		TenantID:        "tenant-alert-total",
+		Username:        "alert-total-user",
+		DisplayName:     "Alert Total User",
+		Password:        "alert123",
+		Roles:           []string{role.Name},
+		AllowedTenants:  []string{"tenant-alert-total"},
+		AllowedProbeIDs: []string{probe.ID},
+	}, &user, http.StatusCreated, adminAuth)
+
+	var login shared.LoginResponse
+	doJSON(t, handler, "/api/v1/auth/login", http.MethodPost, shared.LoginRequest{
+		TenantID: "tenant-alert-total",
+		Username: "alert-total-user",
+		Password: "alert123",
+	}, &login, http.StatusOK, "")
+	auth := "Bearer " + login.Token
+
+	var alerts shared.AlertListResponse
+	doJSON(t, handler, "/api/v1/alerts?tenant_id=tenant-alert-total&page=1&page_size=1", http.MethodGet, nil, &alerts, http.StatusOK, auth)
+	if alerts.Total != 2 {
+		t.Fatalf("expected total=2 for scoped paginated alerts, got %d", alerts.Total)
+	}
+	if len(alerts.Items) != 1 {
+		t.Fatalf("expected one alert item on page 1, got %d", len(alerts.Items))
+	}
 }
 
 func TestOrganizationAndAssetScopeEnforcement(t *testing.T) {

@@ -719,14 +719,15 @@ func (r *Router) handleListAlerts(w http.ResponseWriter, req *http.Request) {
 	if len(operator.AllowedProbeIDs) > 0 && !containsString(operator.Permissions, "*") {
 		filtered := make([]shared.Alert, 0, len(alerts.Items))
 		for _, item := range alerts.Items {
-			item.ProbeIDs = r.service.FilterProbeIDs(operator, item.ProbeIDs)
-			if len(item.ProbeIDs) == 0 {
+			filteredProbeIDs := r.service.FilterProbeIDs(operator, item.ProbeIDs)
+			if len(filteredProbeIDs) == 0 {
 				continue
 			}
+			item.ProbeIDs = filteredProbeIDs
+			item.ProbeCount = len(filteredProbeIDs)
 			filtered = append(filtered, item)
 		}
 		alerts.Items = filtered
-		alerts.Total = len(filtered)
 	}
 	summary := summarizeAlertQuery(query)
 	durationMS := time.Since(startedAt).Milliseconds()

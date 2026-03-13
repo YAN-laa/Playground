@@ -502,6 +502,7 @@ type AlertQuery struct {
 	MaxProbeCount   int              `json:"max_probe_count"`
 	MinWindowMins   int              `json:"min_window_mins"`
 	MaxWindowMins   int              `json:"max_window_mins"`
+	AllowedProbeIDs []string         `json:"allowed_probe_ids,omitempty"`
 	AllowedAssetIDs []string         `json:"allowed_asset_ids,omitempty"`
 	SortBy          string           `json:"sort_by"`
 	SortOrder       string           `json:"sort_order"`

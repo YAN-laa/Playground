@@ -41,11 +41,8 @@
               <p class="eyebrow">平台概览</p>
               <h1 id="page-title">总览</h1>
             </div>
-            <div class="topbar-actions">
-              <input id="tenant-filter" value="demo-tenant" />
-              <button id="refresh-btn">刷新</button>
-            </div>
           </header>
+          <input id="tenant-filter" type="hidden" value="demo-tenant" />
 
           <section id="page-overview" class="page active">
             <div class="card page-card">
@@ -100,6 +97,18 @@
               </div>
               <div class="alert-toolbar">
                 <div class="alert-toolbar-actions">
+                  <div class="alert-toolbar-refresh">
+                    <span class="toolbar-label">自动刷新</span>
+                    <select id="alert-auto-refresh-interval">
+                      <option value="0">关闭</option>
+                      <option value="15">15 秒</option>
+                      <option value="30">30 秒</option>
+                      <option value="60">1 分钟</option>
+                      <option value="300">5 分钟</option>
+                    </select>
+                    <button id="alert-refresh-now-btn" class="ghost" type="button">立即刷新</button>
+                    <span id="alert-auto-refresh-status" class="toolbar-meta">自动刷新已关闭</span>
+                  </div>
                   <select id="alert-sort-by">
                     <option value="last_seen_at">按时间排序</option>
                     <option value="severity">按告警等级排序</option>
@@ -142,8 +151,8 @@
                 </table>
               </div>
               <div class="list-footer">
-                <div id="alerts-total-info" class="muted">共 0 条</div>
-                <div class="detail-actions">
+                <div id="alerts-total-info" class="muted list-summary">共 0 条告警</div>
+                <div class="list-pagination">
                   <button id="alerts-prev-btn" class="ghost" type="button">上一页</button>
                   <span id="alerts-page-info">第 1 页</span>
                   <input id="alerts-page-jump" type="number" min="1" placeholder="页码" />
