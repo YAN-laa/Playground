@@ -2303,39 +2303,41 @@ function renderRelationGraph(graph) {
 }
 
 function renderBurpExchange(exchange, basis) {
+  const requestPacket = exchange?.requestPacket || exchange?.requestRaw || '';
+  const responsePacket = exchange?.responsePacket || exchange?.responseRaw || basis?.response_snippet || '';
   if (!exchange) {
     return `
-      <div class="burp-quad-grid">
-        ${renderPacketBlockPanel('请求头', '暂无可读请求头', '')}
-        ${renderPacketBlockPanel('请求体', '暂无可读请求体', '')}
-        ${renderPacketBlockPanel('响应头', '暂无可读响应头', basis?.response_snippet || '')}
-        ${renderPacketBlockPanel('响应体', '暂无可读响应体', '')}
+      <div class="packet-dual-grid">
+        ${renderPacketMessagePanel('请求包', '暂无可读请求报文', '')}
+        ${renderPacketMessagePanel('响应包', '暂无可读响应报文', responsePacket)}
       </div>
     `;
   }
   return `
-    <div class="burp-quad-grid">
-      ${renderPacketBlockPanel('请求头', exchange.requestHeaderMeta || 'HTTP 请求头', exchange.requestHeaderText || exchange.requestRaw || '')}
-      ${renderPacketBlockPanel('请求体', exchange.requestBodyMeta || 'HTTP 请求体', exchange.requestBodyDetailed || exchange.requestBody || '')}
-      ${renderPacketBlockPanel('响应头', exchange.responseHeaderMeta || 'HTTP 响应头', exchange.responseHeaderText || exchange.responseRaw || basis?.response_snippet || '')}
-      ${renderPacketBlockPanel('响应体', exchange.responseBodyMeta || 'HTTP 响应体', exchange.responseBodyDetailed || exchange.responseBody || '')}
+    <div class="packet-dual-grid">
+      ${renderPacketMessagePanel('请求包', exchange.requestMeta || 'HTTP 请求报文', requestPacket)}
+      ${renderPacketMessagePanel('响应包', exchange.responseMeta || 'HTTP 响应报文', responsePacket)}
     </div>
   `;
 }
 
-function renderPacketBlockPanel(title, subtitle, content) {
+function renderPacketMessagePanel(title, subtitle, content) {
   return `
-    <section class="packet-block-panel">
-      <div class="packet-block-head">
+    <section class="packet-message-panel">
+      <div class="packet-message-head">
         <strong>${escapeHTML(title)}</strong>
         <span>${escapeHTML(subtitle || '')}</span>
       </div>
-      <pre class="packet-block-body">${escapeHTML(content || '暂无可读内容')}</pre>
+      <pre class="packet-message-body">${escapeHTML(content || '暂无可读内容')}</pre>
     </section>
   `;
 }
 
 function extractPrimaryHTTPExchange(detail) {
+  const evidenceExchange = buildPacketExchangeFromEvidence(detail?.packet_evidence);
+  if (evidenceExchange) {
+    return evidenceExchange;
+  }
   const merged = mergeInvestigationEvents(detail);
   let best = null;
   let bestScore = -1;
@@ -2353,6 +2355,8 @@ function extractPrimaryHTTPExchange(detail) {
     if (score > bestScore) {
       best = {
         ...context,
+        requestPacket: context.requestRaw || '',
+        responsePacket: context.responseRaw || '',
         requestMeta: context.method && context.url ? `${context.method} ${context.url}` : '按可读 HTTP 请求整理',
         responseMeta: context.status ? `HTTP ${context.status}` : '按响应状态和响应体整理',
       };
@@ -2360,6 +2364,30 @@ function extractPrimaryHTTPExchange(detail) {
     }
   }
   return best;
+}
+
+function buildPacketExchangeFromEvidence(evidence) {
+  if (!evidence || (!evidence.request_packet && !evidence.response_packet)) {
+    return null;
+  }
+  const requestPacket = truncateAnalysisText(String(evidence.request_packet || '').trim(), 20000);
+  const responsePacket = truncateAnalysisText(String(evidence.response_packet || '').trim(), 20000);
+  const requestParsed = parseHTTPRequest(requestPacket);
+  const responseParsed = parseHTTPResponse(responsePacket);
+  const requestHost = findHeaderValue(requestParsed.headers, 'Host') || evidence.host || '';
+  const responseStatus = parseResponseStatus(responseParsed.startLine) || Number(evidence.status || 0);
+  const methodURL = parseRequestLine(requestParsed.startLine);
+  return {
+    method: evidence.method || methodURL.method || '',
+    url: evidence.url || methodURL.url || '',
+    host: requestHost,
+    status: responseStatus ? String(responseStatus) : '',
+    requestPacket,
+    responsePacket,
+    requestMeta: requestParsed.startLine || [evidence.method, evidence.url].filter(Boolean).join(' ') || `来源 ${evidence.source || 'http-data.log'}`,
+    responseMeta: responseParsed.startLine || (responseStatus ? `HTTP ${responseStatus}` : `来源 ${evidence.source || 'http-data.log'}`),
+    source: evidence.source || 'http-data.log',
+  };
 }
 
 function extractPrimaryDNSExchange(detail) {
@@ -3761,6 +3789,34 @@ function parseHTTPResponse(value) {
     headers,
     body: bodyParts.join('\n\n').trim(),
   };
+}
+
+function parseRequestLine(value) {
+  const text = String(value || '').trim();
+  const match = text.match(/^([A-Z]+)\s+(\S+)\s+HTTP\/\d(?:\.\d)?$/i);
+  if (!match) {
+    return { method: '', url: '' };
+  }
+  return { method: match[1] || '', url: match[2] || '' };
+}
+
+function parseResponseStatus(value) {
+  const text = String(value || '').trim();
+  const match = text.match(/^HTTP\/\d(?:\.\d)?\s+(\d{3})/i);
+  if (!match) {
+    return 0;
+  }
+  return Number(match[1] || 0);
+}
+
+function findHeaderValue(headers, name) {
+  const target = String(name || '').toLowerCase();
+  for (const item of headers || []) {
+    if (String(item?.name || '').toLowerCase() === target) {
+      return String(item.value || '');
+    }
+  }
+  return '';
 }
 
 function filterUsefulHeaders(headers) {

@@ -41,6 +41,28 @@ type eveTracker struct {
 	state     eveOffsetState
 }
 
+type httpDataOffsetState struct {
+	Path    string    `json:"path"`
+	Offset  int64     `json:"offset"`
+	Size    int64     `json:"size"`
+	ModTime time.Time `json:"mod_time"`
+	Inode   uint64    `json:"inode"`
+}
+
+type httpPacketPair struct {
+	BaseKey        string
+	RequestPacket  string
+	ResponsePacket string
+	UpdatedAt      time.Time
+}
+
+type httpDataTracker struct {
+	path      string
+	stateFile string
+	state     httpDataOffsetState
+	packets   map[string]httpPacketPair
+}
+
 func main() {
 	serverURL := flag.String("server", "http://localhost:8080", "server base url")
 	tenantID := flag.String("tenant", "demo-tenant", "tenant id")
@@ -56,6 +78,8 @@ func main() {
 	bufferMaxFiles := flag.Int("buffer-max-files", intEnv("NDR_BUFFER_MAX_FILES", 200), "maximum buffered batch files before oldest files are pruned")
 	bufferMaxBytes := flag.Int64("buffer-max-bytes", int64Env("NDR_BUFFER_MAX_BYTES", 64*1024*1024), "maximum buffered bytes before oldest files are pruned")
 	eveStateFile := flag.String("eve-state-file", "", "state file used to persist eve.json offsets across restarts")
+	httpDataFile := flag.String("http-data-file", "", "path to Suricata http-data.log for raw HTTP packet evidence")
+	httpDataStateFile := flag.String("http-data-state-file", "", "state file used to persist http-data.log offsets across restarts")
 	flag.Parse()
 
 	queueDir := *bufferDir
@@ -79,6 +103,20 @@ func main() {
 			statePath = filepath.Join(queueDir, "eve-offset.json")
 		}
 		initEVETracker(path, statePath)
+	}
+	httpDataPath := strings.TrimSpace(*httpDataFile)
+	if httpDataPath == "" {
+		httpDataPath = strings.TrimSpace(os.Getenv("NDR_HTTP_DATA_FILE"))
+	}
+	if httpDataPath != "" {
+		statePath := strings.TrimSpace(*httpDataStateFile)
+		if statePath == "" {
+			statePath = strings.TrimSpace(os.Getenv("NDR_HTTP_DATA_STATE_FILE"))
+		}
+		if statePath == "" {
+			statePath = filepath.Join(queueDir, "http-data-offset.json")
+		}
+		initHTTPDataTracker(httpDataPath, statePath)
 	}
 
 	probe := register(*serverURL, shared.RegisterProbeRequest{
@@ -340,25 +378,38 @@ func postJSON(url string, body any, out any) error {
 }
 
 var eveStateTracker *eveTracker
+var httpDataStateTracker *httpDataTracker
 
 func loadEvents() []shared.SuricataEvent {
+	var events []shared.SuricataEvent
 	if eveStateTracker != nil {
-		events, err := eveStateTracker.load()
+		var err error
+		events, err = eveStateTracker.load()
 		if err != nil {
 			log.Printf("load eve events failed: path=%s err=%v", eveStateTracker.path, err)
 			return nil
 		}
-		return events
-	}
-	if path := os.Getenv("NDR_EVE_FILE"); path != "" {
-		events, err := loadEventsFromEVEFile(path)
+	} else if path := os.Getenv("NDR_EVE_FILE"); path != "" {
+		var err error
+		events, err = loadEventsFromEVEFile(path)
 		if err != nil {
 			log.Printf("load eve events failed: path=%s err=%v", path, err)
 			return nil
 		}
-		return events
+	} else {
+		events = loadDemoEvents()
 	}
-	return loadDemoEvents()
+	if len(events) == 0 {
+		return nil
+	}
+	if httpDataStateTracker != nil {
+		if err := httpDataStateTracker.load(); err != nil {
+			log.Printf("load http-data packets failed: path=%s err=%v", httpDataStateTracker.path, err)
+		} else {
+			enrichEventsWithHTTPPackets(events, httpDataStateTracker.packets)
+		}
+	}
+	return events
 }
 
 func loadEventsFromEVEFile(path string) ([]shared.SuricataEvent, error) {
@@ -405,6 +456,21 @@ func initEVETracker(path, stateFile string) {
 		log.Printf("load eve state failed: file=%s err=%v", stateFile, err)
 	}
 	eveStateTracker = tracker
+}
+
+func initHTTPDataTracker(path, stateFile string) {
+	tracker := &httpDataTracker{
+		path:      path,
+		stateFile: stateFile,
+		state: httpDataOffsetState{
+			Path: path,
+		},
+		packets: make(map[string]httpPacketPair),
+	}
+	if err := tracker.loadState(); err != nil {
+		log.Printf("load http-data state failed: file=%s err=%v", stateFile, err)
+	}
+	httpDataStateTracker = tracker
 }
 
 func (t *eveTracker) load() ([]shared.SuricataEvent, error) {
@@ -483,6 +549,132 @@ func (t *eveTracker) saveState() error {
 	return os.WriteFile(t.stateFile, data, 0o644)
 }
 
+func (t *httpDataTracker) load() error {
+	file, err := os.Open(t.path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	currentInode := fileInode(info)
+	if t.state.Path != t.path || currentInode != 0 && t.state.Inode != 0 && currentInode != t.state.Inode {
+		t.state.Offset = 0
+	}
+	if info.Size() < t.state.Offset || info.Size() < t.state.Size {
+		t.state.Offset = 0
+	}
+	if _, err := file.Seek(t.state.Offset, io.SeekStart); err != nil {
+		return err
+	}
+	reader := bufio.NewScanner(file)
+	reader.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	currentKey := ""
+	currentSide := ""
+	var packetBytes bytes.Buffer
+	flush := func() {
+		if currentKey == "" || currentSide == "" || packetBytes.Len() == 0 {
+			packetBytes.Reset()
+			return
+		}
+		existing := t.packets[currentKey]
+		existing.BaseKey = currentKey
+		existing.UpdatedAt = time.Now().UTC()
+		text := strings.TrimSpace(strings.ToValidUTF8(packetBytes.String(), ""))
+		if currentSide == "request" {
+			existing.RequestPacket = text
+		} else {
+			existing.ResponsePacket = text
+		}
+		t.packets[currentKey] = existing
+		packetBytes.Reset()
+	}
+	for reader.Scan() {
+		line := strings.TrimRight(reader.Text(), "\r")
+		if baseKey, side, ok := parseHTTPDataHeader(line); ok {
+			flush()
+			currentKey = baseKey
+			currentSide = side
+			continue
+		}
+		packetBytes.Write(decodeHTTPDataHexLine(line))
+	}
+	if err := reader.Err(); err != nil {
+		return err
+	}
+	flush()
+	offset, err := file.Seek(0, io.SeekCurrent)
+	if err == nil {
+		t.state.Offset = offset
+	}
+	t.state.Path = t.path
+	t.state.Size = info.Size()
+	t.state.ModTime = info.ModTime().UTC()
+	t.state.Inode = currentInode
+	t.prunePackets()
+	return t.saveState()
+}
+
+func (t *httpDataTracker) loadState() error {
+	data, err := os.ReadFile(t.stateFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	var state httpDataOffsetState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return err
+	}
+	t.state = state
+	return nil
+}
+
+func (t *httpDataTracker) saveState() error {
+	if err := os.MkdirAll(filepath.Dir(t.stateFile), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(t.state, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(t.stateFile, data, 0o644)
+}
+
+func (t *httpDataTracker) prunePackets() {
+	if len(t.packets) == 0 {
+		return
+	}
+	cutoff := time.Now().UTC().Add(-15 * time.Minute)
+	for key, pair := range t.packets {
+		if pair.UpdatedAt.Before(cutoff) {
+			delete(t.packets, key)
+		}
+	}
+	if len(t.packets) <= 2048 {
+		return
+	}
+	type packetRef struct {
+		Key       string
+		UpdatedAt time.Time
+	}
+	items := make([]packetRef, 0, len(t.packets))
+	for key, pair := range t.packets {
+		items = append(items, packetRef{Key: key, UpdatedAt: pair.UpdatedAt})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].UpdatedAt.Before(items[j].UpdatedAt)
+	})
+	for len(items) > 2048 {
+		delete(t.packets, items[0].Key)
+		items = items[1:]
+	}
+}
+
 func fileInode(info os.FileInfo) uint64 {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat == nil {
@@ -537,6 +729,117 @@ func decodeSuricataEVE(line []byte) (shared.SuricataEvent, bool) {
 		FlowID:    normalizeFlowID(alias.FlowID),
 		Payload:   raw,
 	}, true
+}
+
+func enrichEventsWithHTTPPackets(events []shared.SuricataEvent, packets map[string]httpPacketPair) {
+	if len(events) == 0 || len(packets) == 0 {
+		return
+	}
+	for index := range events {
+		if !isHTTPRelevantEvent(events[index]) {
+			continue
+		}
+		pair, ok := lookupHTTPPacketPair(events[index], packets)
+		if !ok {
+			continue
+		}
+		if events[index].Payload == nil {
+			events[index].Payload = make(map[string]any)
+		}
+		events[index].Payload["_ndr_http_packets"] = map[string]any{
+			"source":          "http-data.log",
+			"request_packet":  pair.RequestPacket,
+			"response_packet": pair.ResponsePacket,
+		}
+	}
+}
+
+func isHTTPRelevantEvent(event shared.SuricataEvent) bool {
+	if strings.EqualFold(event.AppProto, "http") {
+		return true
+	}
+	if event.Payload == nil {
+		return false
+	}
+	if _, ok := event.Payload["http"].(map[string]any); ok {
+		return true
+	}
+	if _, ok := event.Payload["http"].(map[string]string); ok {
+		return true
+	}
+	return strings.EqualFold(event.EventType, "http") || strings.EqualFold(event.EventType, "fileinfo") || strings.EqualFold(event.EventType, "alert")
+}
+
+func lookupHTTPPacketPair(event shared.SuricataEvent, packets map[string]httpPacketPair) (httpPacketPair, bool) {
+	candidates := []string{
+		httpTupleKey(event.SrcIP, event.SrcPort, event.DstIP, event.DstPort),
+		httpTupleKey(event.DstIP, event.DstPort, event.SrcIP, event.SrcPort),
+	}
+	best := httpPacketPair{}
+	bestScore := -1
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		pair, ok := packets[candidate]
+		if !ok {
+			continue
+		}
+		score := len(strings.TrimSpace(pair.RequestPacket)) + len(strings.TrimSpace(pair.ResponsePacket))
+		if strings.TrimSpace(pair.RequestPacket) != "" {
+			score += 1000
+		}
+		if strings.TrimSpace(pair.ResponsePacket) != "" {
+			score += 1000
+		}
+		if score > bestScore {
+			best = pair
+			bestScore = score
+		}
+	}
+	return best, bestScore >= 0
+}
+
+func httpTupleKey(srcIP string, srcPort int, dstIP string, dstPort int) string {
+	if strings.TrimSpace(srcIP) == "" || strings.TrimSpace(dstIP) == "" || srcPort <= 0 || dstPort <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s_%d-%s_%d", srcIP, srcPort, dstIP, dstPort)
+}
+
+func parseHTTPDataHeader(line string) (string, string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasSuffix(trimmed, ":") {
+		return "", "", false
+	}
+	trimmed = strings.TrimSuffix(trimmed, ":")
+	switch {
+	case strings.HasSuffix(trimmed, "-ts"):
+		return strings.TrimSuffix(trimmed, "-ts"), "request", true
+	case strings.HasSuffix(trimmed, "-tc"):
+		return strings.TrimSuffix(trimmed, "-tc"), "response", true
+	default:
+		return "", "", false
+	}
+}
+
+func decodeHTTPDataHexLine(line string) []byte {
+	fields := strings.Fields(strings.TrimSpace(line))
+	if len(fields) < 2 {
+		return nil
+	}
+	out := make([]byte, 0, 64)
+	for _, field := range fields[1:] {
+		if len(field) != 2 {
+			break
+		}
+		value, err := strconv.ParseUint(field, 16, 8)
+		if err != nil {
+			break
+		}
+		out = append(out, byte(value))
+	}
+	return out
 }
 
 func normalizeFlowID(value any) string {
@@ -675,6 +978,9 @@ func listQueuedBatches(queueDir string) ([]persistedBatch, error) {
 		}
 		var batch shared.EventBatch
 		if err := json.Unmarshal(content, &batch); err != nil {
+			continue
+		}
+		if strings.TrimSpace(batch.TenantID) == "" || strings.TrimSpace(batch.ProbeID) == "" || len(batch.Events) == 0 {
 			continue
 		}
 		info, err := entry.Info()

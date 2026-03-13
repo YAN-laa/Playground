@@ -387,6 +387,7 @@ func (s *Service) GetAlertDetail(ctx context.Context, id string) (shared.AlertDe
 	}
 	decisionBasis := buildAlertDecisionBasis(alert, events, contextEvents)
 	alert.AttackResult = decisionBasis.AttackResult
+	packetEvidence := buildPacketEvidence(events, contextEvents)
 	return shared.AlertDetail{
 		Alert:               alert,
 		Events:              events,
@@ -395,6 +396,7 @@ func (s *Service) GetAlertDetail(ctx context.Context, id string) (shared.AlertDe
 		Tickets:             tickets,
 		Activities:          activities,
 		DecisionBasis:       decisionBasis,
+		PacketEvidence:      packetEvidence,
 		SameSourceTimeline:  limitTimelineItems(buildRelatedAlertTimeline("source", alert, append([]shared.Alert{alert}, similarSource...), rawEvents), 30),
 		SameTargetTimeline:  limitTimelineItems(buildRelatedAlertTimeline("target", alert, append([]shared.Alert{alert}, similarTarget...), rawEvents), 30),
 		SameFlowTimeline:    limitTimelineItems(buildFlowTimeline(events, contextEvents), 40),
@@ -562,6 +564,7 @@ func (s *Service) GetRawAlertDetail(ctx context.Context, user shared.User, id st
 		Event:           target,
 		ContextEvents:   contextEvents,
 		Flows:           flows,
+		PacketEvidence:  buildPacketEvidence([]shared.RawEvent{target}, contextEvents),
 		AggregateAlerts: filteredAlerts,
 	}, true, nil
 }
@@ -3439,6 +3442,394 @@ func responseSnippet(event shared.SuricataEvent, status int) string {
 		return fmt.Sprintf("HTTP %d · %s", status, body)
 	}
 	return fmt.Sprintf("HTTP %d", status)
+}
+
+func buildPacketEvidence(events []shared.RawEvent, contextEvents []shared.RawEvent) *shared.HTTPPacketEvidence {
+	all := collectHTTPPacketRelevantEvents(events, contextEvents)
+	if len(all) == 0 {
+		return nil
+	}
+	builder := httpPacketBuilder{}
+	for _, event := range all {
+		builder.mergePacketSource(event.Payload)
+		builder.mergeHTTPContext(event.Payload)
+	}
+	evidence := builder.build()
+	if evidence == nil {
+		return nil
+	}
+	return evidence
+}
+
+type httpPacketBuilder struct {
+	source          string
+	method          string
+	url             string
+	host            string
+	status          int
+	requestPacket   string
+	responsePacket  string
+	requestHeaders  []sharedHeader
+	responseHeaders []sharedHeader
+	requestBody     string
+	responseBody    string
+}
+
+type sharedHeader struct {
+	Name  string
+	Value string
+}
+
+func collectHTTPPacketRelevantEvents(events []shared.RawEvent, contextEvents []shared.RawEvent) []shared.RawEvent {
+	all := append([]shared.RawEvent{}, events...)
+	all = append(all, contextEvents...)
+	out := make([]shared.RawEvent, 0, len(all))
+	primaryFlow := ""
+	primaryTxID := ""
+	if len(events) > 0 {
+		primaryFlow = events[0].Payload.FlowID
+		primaryTxID = extractPayloadTXID(events[0].Payload.Payload)
+	}
+	for _, event := range all {
+		payload := event.Payload.Payload
+		if !hasHTTPPacketContext(event.Payload) {
+			continue
+		}
+		if primaryFlow != "" && event.Payload.FlowID != "" && event.Payload.FlowID != primaryFlow {
+			continue
+		}
+		if primaryTxID != "" {
+			txID := extractPayloadTXID(payload)
+			if txID != "" && txID != primaryTxID {
+				continue
+			}
+		}
+		out = append(out, event)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].EventTime.Before(out[j].EventTime)
+	})
+	return out
+}
+
+func hasHTTPPacketContext(event shared.SuricataEvent) bool {
+	if packetMap := extractPacketMap(event.Payload); len(packetMap) > 0 {
+		return true
+	}
+	if strings.EqualFold(event.AppProto, "http") || strings.EqualFold(event.EventType, "http") {
+		return true
+	}
+	if _, ok := event.Payload["http"].(map[string]any); ok {
+		return true
+	}
+	if firstNonEmptyString(
+		event.Payload["payload_printable"],
+		event.Payload["http_request_body"],
+		event.Payload["http_response_body_printable"],
+		event.Payload["http_response_body"],
+	) != "" {
+		return true
+	}
+	return false
+}
+
+func (b *httpPacketBuilder) mergePacketSource(event shared.SuricataEvent) {
+	packetMap := extractPacketMap(event.Payload)
+	if len(packetMap) == 0 {
+		return
+	}
+	if requestPacket := truncatePacketEvidence(firstNonEmptyString(packetMap["request_packet"])); requestPacket != "" {
+		if len(requestPacket) >= len(b.requestPacket) {
+			b.requestPacket = requestPacket
+		}
+	}
+	if responsePacket := truncatePacketEvidence(firstNonEmptyString(packetMap["response_packet"])); responsePacket != "" {
+		if len(responsePacket) >= len(b.responsePacket) {
+			b.responsePacket = responsePacket
+		}
+	}
+	if source := firstNonEmptyString(packetMap["source"]); source != "" {
+		b.source = source
+	}
+}
+
+func (b *httpPacketBuilder) mergeHTTPContext(event shared.SuricataEvent) {
+	payload := event.Payload
+	if method := extractHTTPMethod(event); method != "" {
+		b.method = method
+	}
+	if url := extractHTTPURL(event); url != "" {
+		b.url = url
+	}
+	if host := extractHTTPHost(event); host != "" {
+		b.host = host
+	}
+	if status := extractHTTPStatus(event); status != 0 {
+		b.status = status
+	}
+	if requestPacket := extractReadableHTTPRequest(event); requestPacket != "" && len(requestPacket) >= len(b.requestPacket) {
+		b.requestPacket = truncatePacketEvidence(requestPacket)
+	}
+	if responsePacket := extractReadableHTTPResponse(event); responsePacket != "" && len(responsePacket) >= len(b.responsePacket) {
+		b.responsePacket = truncatePacketEvidence(responsePacket)
+	}
+	b.requestHeaders = mergeHeaders(b.requestHeaders, extractHeaders(event, "request_headers"))
+	b.responseHeaders = mergeHeaders(b.responseHeaders, extractHeaders(event, "response_headers"))
+	if body := selectPacketBody(
+		decodeEvidenceBody(firstNonEmptyString(payload["http_request_body"], nestedObjectValue(payload, "http", "http_request_body"), payload["request_body"])),
+		decodeEvidenceBody(firstNonEmptyString(payload["http_request_body_printable"], nestedObjectValue(payload, "http", "http_request_body_printable"))),
+	); len(body) >= len(b.requestBody) {
+		b.requestBody = truncatePacketEvidence(body)
+	}
+	if body := selectPacketBody(
+		firstNonEmptyString(payload["http_response_body_printable"], nestedObjectValue(payload, "http", "http_response_body_printable")),
+		decodeEvidenceBody(firstNonEmptyString(payload["http_response_body"], nestedObjectValue(payload, "http", "http_response_body"), payload["response_body"])),
+	); len(body) >= len(b.responseBody) {
+		b.responseBody = truncatePacketEvidence(body)
+	}
+}
+
+func (b *httpPacketBuilder) build() *shared.HTTPPacketEvidence {
+	requestPacket := strings.TrimSpace(b.requestPacket)
+	if requestPacket == "" {
+		requestPacket = buildHTTPRequestPacket(b.method, b.url, b.host, b.requestHeaders, b.requestBody)
+	}
+	responsePacket := strings.TrimSpace(b.responsePacket)
+	if responsePacket == "" {
+		responsePacket = buildHTTPResponsePacket(b.status, b.responseHeaders, b.responseBody)
+	}
+	if requestPacket == "" && responsePacket == "" {
+		return nil
+	}
+	source := b.source
+	if source == "" {
+		source = "eve.json"
+	}
+	return &shared.HTTPPacketEvidence{
+		Source:         source,
+		Method:         b.method,
+		URL:            b.url,
+		Host:           b.host,
+		Status:         b.status,
+		RequestPacket:  truncatePacketEvidence(requestPacket),
+		ResponsePacket: truncatePacketEvidence(responsePacket),
+	}
+}
+
+func extractPacketMap(payload map[string]any) map[string]any {
+	if payload == nil {
+		return nil
+	}
+	packetMap, _ := payload["_ndr_http_packets"].(map[string]any)
+	return packetMap
+}
+
+func extractReadableHTTPRequest(event shared.SuricataEvent) string {
+	for _, value := range []string{
+		firstNonEmptyString(event.Payload["payload_printable"]),
+		decodeEvidenceBody(firstNonEmptyString(event.Payload["payload"])),
+	} {
+		trimmed := strings.TrimSpace(value)
+		if looksLikeHTTPRequest(trimmed) {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func extractReadableHTTPResponse(event shared.SuricataEvent) string {
+	for _, value := range []string{
+		firstNonEmptyString(event.Payload["http_response_body_printable"], nestedObjectValue(event.Payload, "http", "http_response_body_printable")),
+		decodeEvidenceBody(firstNonEmptyString(event.Payload["http_response_body"], nestedObjectValue(event.Payload, "http", "http_response_body"), event.Payload["response_body"])),
+		decodeEvidenceBody(firstNonEmptyString(event.Payload["payload"])),
+	} {
+		trimmed := strings.TrimSpace(value)
+		if looksLikeHTTPResponse(trimmed) {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func extractHeaders(event shared.SuricataEvent, key string) []sharedHeader {
+	httpPayload, _ := event.Payload["http"].(map[string]any)
+	values, _ := httpPayload[key].([]any)
+	headers := make([]sharedHeader, 0, len(values))
+	for _, value := range values {
+		item, _ := value.(map[string]any)
+		name := firstNonEmptyString(item["name"])
+		headerValue := firstNonEmptyString(item["value"])
+		if name == "" || headerValue == "" {
+			continue
+		}
+		headers = append(headers, sharedHeader{Name: name, Value: headerValue})
+	}
+	return headers
+}
+
+func mergeHeaders(base []sharedHeader, incoming []sharedHeader) []sharedHeader {
+	if len(incoming) == 0 {
+		return base
+	}
+	index := make(map[string]int, len(base))
+	out := append([]sharedHeader{}, base...)
+	for i, header := range out {
+		index[strings.ToLower(header.Name)] = i
+	}
+	for _, header := range incoming {
+		key := strings.ToLower(header.Name)
+		if pos, ok := index[key]; ok {
+			out[pos] = header
+			continue
+		}
+		index[key] = len(out)
+		out = append(out, header)
+	}
+	return out
+}
+
+func buildHTTPRequestPacket(method, url, host string, headers []sharedHeader, body string) string {
+	if method == "" && url == "" && host == "" && body == "" && len(headers) == 0 {
+		return ""
+	}
+	startLine := strings.TrimSpace(fmt.Sprintf("%s %s HTTP/1.1", blankAs(method, "GET"), blankAs(url, "/")))
+	headerLines := make([]string, 0, len(headers)+1)
+	merged := mergeHeaders(headers, []sharedHeader{{Name: "Host", Value: host}})
+	for _, header := range merged {
+		if strings.TrimSpace(header.Name) == "" || strings.TrimSpace(header.Value) == "" {
+			continue
+		}
+		headerLines = append(headerLines, fmt.Sprintf("%s: %s", header.Name, header.Value))
+	}
+	parts := []string{startLine}
+	parts = append(parts, headerLines...)
+	parts = append(parts, "")
+	if strings.TrimSpace(body) != "" {
+		parts = append(parts, body)
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
+
+func buildHTTPResponsePacket(status int, headers []sharedHeader, body string) string {
+	if status == 0 && len(headers) == 0 && strings.TrimSpace(body) == "" {
+		return ""
+	}
+	reason := http.StatusText(status)
+	startLine := strings.TrimSpace(fmt.Sprintf("HTTP/1.1 %d %s", maxInt(status, 200), reason))
+	headerLines := make([]string, 0, len(headers))
+	for _, header := range headers {
+		if strings.TrimSpace(header.Name) == "" || strings.TrimSpace(header.Value) == "" {
+			continue
+		}
+		headerLines = append(headerLines, fmt.Sprintf("%s: %s", header.Name, header.Value))
+	}
+	parts := []string{startLine}
+	parts = append(parts, headerLines...)
+	parts = append(parts, "")
+	if strings.TrimSpace(body) != "" {
+		parts = append(parts, body)
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
+
+func decodeEvidenceBody(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	if len(trimmed) > 32768 {
+		return ""
+	}
+	if !base64Like(trimmed) {
+		return trimmed
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(trimmed, "\n", ""))
+	if err != nil {
+		return trimmed
+	}
+	if !isMostlyReadable(decoded) {
+		return ""
+	}
+	return strings.TrimSpace(string(decoded))
+}
+
+func base64Like(value string) bool {
+	for _, r := range value {
+		switch {
+		case r >= 'A' && r <= 'Z':
+		case r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9':
+		case r == '+' || r == '/' || r == '=' || r == '\n' || r == '\r':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func isMostlyReadable(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	printable := 0
+	for _, b := range data {
+		if b == '\n' || b == '\r' || b == '\t' || (b >= 32 && b <= 126) {
+			printable++
+		}
+	}
+	return float64(printable)/float64(len(data)) >= 0.8
+}
+
+func selectPacketBody(values ...string) string {
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func looksLikeHTTPRequest(value string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(value))
+	for _, prefix := range []string{"GET ", "POST ", "PUT ", "DELETE ", "PATCH ", "HEAD ", "OPTIONS "} {
+		if strings.HasPrefix(upper, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeHTTPResponse(value string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(value))
+	return strings.HasPrefix(upper, "HTTP/1.0 ") || strings.HasPrefix(upper, "HTTP/1.1 ") || strings.HasPrefix(upper, "HTTP/2 ")
+}
+
+func extractPayloadTXID(payload map[string]any) string {
+	if payload == nil {
+		return ""
+	}
+	switch value := payload["tx_id"].(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case float64:
+		return fmt.Sprintf("%.0f", value)
+	case int:
+		return fmt.Sprintf("%d", value)
+	default:
+		return ""
+	}
+}
+
+func truncatePacketEvidence(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	if len(trimmed) <= 20000 {
+		return trimmed
+	}
+	return trimmed[:20000] + "\n\n... 已截断，避免页面加载过慢 ..."
 }
 
 func nestedObjectValue(root map[string]any, key string, nested string) any {

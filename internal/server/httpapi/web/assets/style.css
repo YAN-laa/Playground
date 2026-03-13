@@ -1414,20 +1414,20 @@ select[multiple] {
   gap: 12px;
 }
 
-.burp-quad-grid {
+.packet-dual-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
 
-.packet-block-panel {
+.packet-message-panel {
   border: 1px solid #d8dde6;
   border-radius: 12px;
   background: #ffffff;
   overflow: hidden;
 }
 
-.packet-block-head {
+.packet-message-head {
   display: flex;
   justify-content: space-between;
   gap: 8px;
@@ -1437,20 +1437,20 @@ select[multiple] {
   background: #ffffff;
 }
 
-.packet-block-head strong {
+.packet-message-head strong {
   font-size: 14px;
 }
 
-.packet-block-head span {
+.packet-message-head span {
   font-size: 11px;
   color: var(--muted);
 }
 
-.packet-block-body {
+.packet-message-body {
   margin: 0;
   padding: 12px;
-  min-height: 300px;
-  max-height: 420px;
+  min-height: 420px;
+  max-height: 640px;
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
@@ -2327,7 +2327,7 @@ a:hover {
   .relation-entry-grid,
   .relation-entry-stats,
   .burp-grid,
-  .burp-quad-grid,
+  .packet-dual-grid,
   .intent-lane-track,
   .overview-reason-grid {
     grid-template-columns: 1fr 1fr;
@@ -2405,7 +2405,7 @@ a:hover {
   .relation-entry-grid,
   .relation-entry-stats,
   .burp-grid,
-  .burp-quad-grid,
+  .packet-dual-grid,
   .intent-lane-track,
   .overview-reason-grid {
     grid-template-columns: 1fr;

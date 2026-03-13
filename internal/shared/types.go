@@ -438,6 +438,7 @@ type AlertDetail struct {
 	Tickets             []Ticket            `json:"tickets"`
 	Activities          []Activity          `json:"activities"`
 	DecisionBasis       AlertDecisionBasis  `json:"decision_basis"`
+	PacketEvidence      *HTTPPacketEvidence `json:"packet_evidence,omitempty"`
 	SameSourceTimeline  []AlertTimelineItem `json:"same_source_timeline"`
 	SameTargetTimeline  []AlertTimelineItem `json:"same_target_timeline"`
 	SameFlowTimeline    []AlertTimelineItem `json:"same_flow_timeline"`
@@ -451,6 +452,16 @@ type AlertDecisionBasis struct {
 	ResponseSnippet    string   `json:"response_snippet"`
 	AggregationReason  []string `json:"aggregation_reason"`
 	RiskReason         []string `json:"risk_reason"`
+}
+
+type HTTPPacketEvidence struct {
+	Source         string `json:"source"`
+	Method         string `json:"method"`
+	URL            string `json:"url"`
+	Host           string `json:"host"`
+	Status         int    `json:"status"`
+	RequestPacket  string `json:"request_packet"`
+	ResponsePacket string `json:"response_packet"`
 }
 
 type AlertTimelineItem struct {
@@ -540,11 +551,12 @@ type RawAlertListResponse struct {
 }
 
 type RawAlertDetail struct {
-	Item            RawAlertItem `json:"item"`
-	Event           RawEvent     `json:"event"`
-	ContextEvents   []RawEvent   `json:"context_events"`
-	Flows           []Flow       `json:"flows"`
-	AggregateAlerts []Alert      `json:"aggregate_alerts"`
+	Item            RawAlertItem        `json:"item"`
+	Event           RawEvent            `json:"event"`
+	ContextEvents   []RawEvent          `json:"context_events"`
+	Flows           []Flow              `json:"flows"`
+	PacketEvidence  *HTTPPacketEvidence `json:"packet_evidence,omitempty"`
+	AggregateAlerts []Alert             `json:"aggregate_alerts"`
 }
 
 type Ticket struct {

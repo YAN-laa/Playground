@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -825,13 +826,107 @@ func (s *PostgresStore) ListProbeMetrics(ctx context.Context, query shared.Probe
 }
 
 func (s *PostgresStore) AddRawEvent(ctx context.Context, event shared.RawEvent) error {
-	payload, err := json.Marshal(event.Payload)
+	sanitized := sanitizeRawEventForJSONB(event)
+	payload, err := json.Marshal(sanitized.Payload)
 	if err != nil {
 		return err
 	}
 	_, err = s.pool.Exec(ctx, `insert into raw_events (id, tenant_id, probe_id, event_type, event_time, ingest_time, payload) values ($1,$2,$3,$4,$5,$6,$7)`,
-		event.ID, event.TenantID, event.ProbeID, event.EventType, event.EventTime, event.IngestTime, payload)
+		sanitized.ID, sanitized.TenantID, sanitized.ProbeID, sanitized.EventType, sanitized.EventTime, sanitized.IngestTime, payload)
 	return err
+}
+
+func sanitizeRawEventForJSONB(event shared.RawEvent) shared.RawEvent {
+	event.ID = sanitizeJSONString(event.ID)
+	event.TenantID = sanitizeJSONString(event.TenantID)
+	event.ProbeID = sanitizeJSONString(event.ProbeID)
+	event.EventType = sanitizeJSONString(event.EventType)
+	event.Payload = sanitizeSuricataEventForJSONB(event.Payload)
+	return event
+}
+
+func sanitizeSuricataEventForJSONB(event shared.SuricataEvent) shared.SuricataEvent {
+	event.Timestamp = sanitizeJSONString(event.Timestamp)
+	event.EventType = sanitizeJSONString(event.EventType)
+	event.SrcIP = sanitizeJSONString(event.SrcIP)
+	event.DstIP = sanitizeJSONString(event.DstIP)
+	event.Proto = sanitizeJSONString(event.Proto)
+	event.AppProto = sanitizeJSONString(event.AppProto)
+	event.FlowID = sanitizeJSONString(event.FlowID)
+	if event.Alert != nil {
+		event.Alert = &shared.SuricataAlert{
+			SignatureID: event.Alert.SignatureID,
+			Signature:   sanitizeJSONString(event.Alert.Signature),
+			Category:    sanitizeJSONString(event.Alert.Category),
+			Severity:    event.Alert.Severity,
+		}
+	}
+	event.Payload = sanitizeJSONValueForJSONB(event.Payload)
+	return event
+}
+
+func sanitizeJSONValueForJSONB(value any) map[string]any {
+	out, _ := sanitizeJSONAnyForJSONB(value).(map[string]any)
+	if out == nil {
+		return map[string]any{}
+	}
+	return out
+}
+
+func sanitizeJSONAnyForJSONB(value any) any {
+	switch typed := value.(type) {
+	case nil:
+		return nil
+	case string:
+		return sanitizeJSONString(typed)
+	case []byte:
+		return sanitizeJSONString(string(typed))
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			out[sanitizeJSONString(key)] = sanitizeJSONAnyForJSONB(item)
+		}
+		return out
+	case []any:
+		out := make([]any, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, sanitizeJSONAnyForJSONB(item))
+		}
+		return out
+	case map[string]string:
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			out[sanitizeJSONString(key)] = sanitizeJSONString(item)
+		}
+		return out
+	case []string:
+		out := make([]any, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, sanitizeJSONString(item))
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func sanitizeJSONString(value string) string {
+	if value == "" {
+		return ""
+	}
+	if !utf8.ValidString(value) {
+		value = strings.ToValidUTF8(value, "")
+	}
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == 0:
+			return -1
+		case r >= 0xD800 && r <= 0xDFFF:
+			return -1
+		default:
+			return r
+		}
+	}, value)
 }
 
 func (s *PostgresStore) ListRawEvents(ctx context.Context, tenantID string, since, until time.Time, probeIDs []string) ([]shared.RawEvent, error) {
