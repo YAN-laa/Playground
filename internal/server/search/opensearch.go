@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -60,9 +61,9 @@ func (e *OpenSearchEngine) SearchAlerts(ctx context.Context, query shared.AlertQ
 	page, pageSize := normalizePage(query.Page, query.PageSize)
 	alertQuery := buildAlertSearchQuery(query)
 	body := map[string]any{
-		"size": normalizeLimit(pageSize, 100),
-		"from": max((page-1)*normalizeLimit(pageSize, 100), 0),
-		"sort": []map[string]any{{defaultString(query.SortBy, "last_seen_at"): map[string]string{"order": defaultString(query.SortOrder, "desc")}}},
+		"size":  normalizeLimit(pageSize, 100),
+		"from":  max((page-1)*normalizeLimit(pageSize, 100), 0),
+		"sort":  []map[string]any{{defaultString(query.SortBy, "last_seen_at"): map[string]string{"order": defaultString(query.SortOrder, "desc")}}},
 		"query": alertQuery,
 	}
 	var result struct {
@@ -380,55 +381,63 @@ func buildAlertSearchQuery(query shared.AlertQuery) map[string]any {
 }
 
 func buildAlertConditionClauses(query shared.AlertQuery) []map[string]any {
-	clauses := make([]map[string]any, 0, 12)
-	if query.Status != "" {
-		clauses = append(clauses, map[string]any{"term": map[string]any{"status.keyword": query.Status}})
-	}
-	if query.SrcIP != "" {
-		clauses = append(clauses, map[string]any{"term": map[string]any{"src_ip.keyword": query.SrcIP}})
-	}
-	if query.DstIP != "" {
-		clauses = append(clauses, map[string]any{"term": map[string]any{"dst_ip.keyword": query.DstIP}})
-	}
-	if query.Signature != "" {
-		clauses = append(clauses, map[string]any{"match": map[string]any{"signature": query.Signature}})
-	}
-	if query.Category != "" {
-		clauses = append(clauses, map[string]any{"match": map[string]any{"category": query.Category}})
-	}
-	if query.Probe != "" {
-		clauses = append(clauses, map[string]any{"wildcard": map[string]any{"probe_ids.keyword": fmt.Sprintf("*%s*", query.Probe)}})
-	}
-	if query.Assignee != "" {
-		clauses = append(clauses, map[string]any{"term": map[string]any{"assignee.keyword": query.Assignee}})
-	}
-	if query.Severity > 0 {
-		clauses = append(clauses, map[string]any{"term": map[string]any{"severity": query.Severity}})
-	}
-	if query.AttackResult != "" {
-		clauses = append(clauses, map[string]any{"term": map[string]any{"attack_result.keyword": query.AttackResult}})
-	}
-	if query.MinProbeCount > 0 || query.MaxProbeCount > 0 {
-		rangeBody := map[string]any{}
-		if query.MinProbeCount > 0 {
-			rangeBody["gte"] = query.MinProbeCount
+	clauses := make([]map[string]any, 0, len(query.EffectiveConditions()))
+	for _, condition := range query.EffectiveConditions() {
+		clause, ok := buildAlertConditionClause(condition)
+		if !ok {
+			continue
 		}
-		if query.MaxProbeCount > 0 {
-			rangeBody["lte"] = query.MaxProbeCount
-		}
-		clauses = append(clauses, map[string]any{"range": map[string]any{"probe_count": rangeBody}})
-	}
-	if query.MinWindowMins > 0 || query.MaxWindowMins > 0 {
-		rangeBody := map[string]any{}
-		if query.MinWindowMins > 0 {
-			rangeBody["gte"] = query.MinWindowMins
-		}
-		if query.MaxWindowMins > 0 {
-			rangeBody["lte"] = query.MaxWindowMins
-		}
-		clauses = append(clauses, map[string]any{"range": map[string]any{"window_minutes": rangeBody}})
+		clauses = append(clauses, clause)
 	}
 	return clauses
+}
+
+func buildAlertConditionClause(condition shared.AlertCondition) (map[string]any, bool) {
+	switch shared.NormalizeAlertConditionField(condition.Field) {
+	case "ip":
+		return map[string]any{
+			"bool": map[string]any{
+				"should": []map[string]any{
+					{"term": map[string]any{"src_ip.keyword": condition.Value}},
+					{"term": map[string]any{"dst_ip.keyword": condition.Value}},
+				},
+				"minimum_should_match": 1,
+			},
+		}, true
+	case "src_ip":
+		return map[string]any{"term": map[string]any{"src_ip.keyword": condition.Value}}, true
+	case "dst_ip":
+		return map[string]any{"term": map[string]any{"dst_ip.keyword": condition.Value}}, true
+	case "signature":
+		return map[string]any{"match": map[string]any{"signature": condition.Value}}, true
+	case "category":
+		return map[string]any{"match": map[string]any{"category": condition.Value}}, true
+	case "probe":
+		return map[string]any{"wildcard": map[string]any{"probe_ids.keyword": fmt.Sprintf("*%s*", condition.Value)}}, true
+	case "assignee":
+		return map[string]any{"term": map[string]any{"assignee.keyword": condition.Value}}, true
+	case "status":
+		return map[string]any{"term": map[string]any{"status.keyword": condition.Value}}, true
+	case "attack_result":
+		return map[string]any{"term": map[string]any{"attack_result.keyword": condition.Value}}, true
+	case "severity":
+		value, err := strconv.Atoi(condition.Value)
+		return map[string]any{"term": map[string]any{"severity": value}}, err == nil
+	case "min_probe_count":
+		value, err := strconv.Atoi(condition.Value)
+		return map[string]any{"range": map[string]any{"probe_count": map[string]any{"gte": value}}}, err == nil
+	case "max_probe_count":
+		value, err := strconv.Atoi(condition.Value)
+		return map[string]any{"range": map[string]any{"probe_count": map[string]any{"lte": value}}}, err == nil
+	case "min_window_mins":
+		value, err := strconv.Atoi(condition.Value)
+		return map[string]any{"range": map[string]any{"window_minutes": map[string]any{"gte": value}}}, err == nil
+	case "max_window_mins":
+		value, err := strconv.Atoi(condition.Value)
+		return map[string]any{"range": map[string]any{"window_minutes": map[string]any{"lte": value}}}, err == nil
+	default:
+		return nil, false
+	}
 }
 
 func buildFlowFilters(query shared.FlowQuery) []map[string]any {

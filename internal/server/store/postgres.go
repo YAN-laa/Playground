@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -1337,71 +1338,15 @@ func (s *PostgresStore) ListAlerts(ctx context.Context, query shared.AlertQuery)
 		args = append(args, query.Since)
 		idx++
 	}
-	predicates := make([]string, 0, 12)
-	if query.Status != "" {
-		predicates = append(predicates, fmt.Sprintf("status=$%d", idx))
-		args = append(args, query.Status)
-		idx++
-	}
-	if query.SrcIP != "" {
-		predicates = append(predicates, fmt.Sprintf("src_ip=$%d", idx))
-		args = append(args, query.SrcIP)
-		idx++
-	}
-	if query.DstIP != "" {
-		predicates = append(predicates, fmt.Sprintf("dst_ip=$%d", idx))
-		args = append(args, query.DstIP)
-		idx++
-	}
-	if query.Signature != "" {
-		predicates = append(predicates, fmt.Sprintf("lower(signature) like lower($%d)", idx))
-		args = append(args, "%"+query.Signature+"%")
-		idx++
-	}
-	if query.Category != "" {
-		predicates = append(predicates, fmt.Sprintf("lower(category) like lower($%d)", idx))
-		args = append(args, "%"+query.Category+"%")
-		idx++
-	}
-	if query.Probe != "" {
-		predicates = append(predicates, fmt.Sprintf("array_to_string(probe_ids, ',') ilike $%d", idx))
-		args = append(args, "%"+query.Probe+"%")
-		idx++
-	}
-	if query.Severity != 0 {
-		predicates = append(predicates, fmt.Sprintf("severity=$%d", idx))
-		args = append(args, query.Severity)
-		idx++
-	}
-	if query.Assignee != "" {
-		predicates = append(predicates, fmt.Sprintf("assignee=$%d", idx))
-		args = append(args, query.Assignee)
-		idx++
-	}
-	if query.AttackResult != "" {
-		predicates = append(predicates, fmt.Sprintf("attack_result=$%d", idx))
-		args = append(args, query.AttackResult)
-		idx++
-	}
-	if query.MinProbeCount > 0 {
-		predicates = append(predicates, fmt.Sprintf("probe_count >= $%d", idx))
-		args = append(args, query.MinProbeCount)
-		idx++
-	}
-	if query.MaxProbeCount > 0 {
-		predicates = append(predicates, fmt.Sprintf("probe_count <= $%d", idx))
-		args = append(args, query.MaxProbeCount)
-		idx++
-	}
-	if query.MinWindowMins > 0 {
-		predicates = append(predicates, fmt.Sprintf("window_minutes >= $%d", idx))
-		args = append(args, query.MinWindowMins)
-		idx++
-	}
-	if query.MaxWindowMins > 0 {
-		predicates = append(predicates, fmt.Sprintf("window_minutes <= $%d", idx))
-		args = append(args, query.MaxWindowMins)
-		idx++
+	predicates := make([]string, 0, len(query.EffectiveConditions()))
+	for _, condition := range query.EffectiveConditions() {
+		predicate, predicateArgs, ok := buildAlertPredicate(condition, idx)
+		if !ok {
+			continue
+		}
+		predicates = append(predicates, predicate)
+		args = append(args, predicateArgs...)
+		idx += len(predicateArgs)
 	}
 	if len(predicates) > 0 {
 		joiner := " and "
@@ -1427,6 +1372,46 @@ func (s *PostgresStore) ListAlerts(ctx context.Context, query shared.AlertQuery)
 		}
 	}
 	return out, rows.Err()
+}
+
+func buildAlertPredicate(condition shared.AlertCondition, idx int) (string, []any, bool) {
+	switch shared.NormalizeAlertConditionField(condition.Field) {
+	case "ip":
+		return fmt.Sprintf("(src_ip=$%d or dst_ip=$%d)", idx, idx), []any{condition.Value}, true
+	case "src_ip":
+		return fmt.Sprintf("src_ip=$%d", idx), []any{condition.Value}, true
+	case "dst_ip":
+		return fmt.Sprintf("dst_ip=$%d", idx), []any{condition.Value}, true
+	case "signature":
+		return fmt.Sprintf("lower(signature) like lower($%d)", idx), []any{"%" + condition.Value + "%"}, true
+	case "category":
+		return fmt.Sprintf("lower(category) like lower($%d)", idx), []any{"%" + condition.Value + "%"}, true
+	case "probe":
+		return fmt.Sprintf("array_to_string(probe_ids, ',') ilike $%d", idx), []any{"%" + condition.Value + "%"}, true
+	case "severity":
+		value, err := strconv.Atoi(condition.Value)
+		return fmt.Sprintf("severity=$%d", idx), []any{value}, err == nil
+	case "assignee":
+		return fmt.Sprintf("assignee=$%d", idx), []any{condition.Value}, true
+	case "status":
+		return fmt.Sprintf("status=$%d", idx), []any{condition.Value}, true
+	case "attack_result":
+		return fmt.Sprintf("attack_result=$%d", idx), []any{condition.Value}, true
+	case "min_probe_count":
+		value, err := strconv.Atoi(condition.Value)
+		return fmt.Sprintf("probe_count >= $%d", idx), []any{value}, err == nil
+	case "max_probe_count":
+		value, err := strconv.Atoi(condition.Value)
+		return fmt.Sprintf("probe_count <= $%d", idx), []any{value}, err == nil
+	case "min_window_mins":
+		value, err := strconv.Atoi(condition.Value)
+		return fmt.Sprintf("window_minutes >= $%d", idx), []any{value}, err == nil
+	case "max_window_mins":
+		value, err := strconv.Atoi(condition.Value)
+		return fmt.Sprintf("window_minutes <= $%d", idx), []any{value}, err == nil
+	default:
+		return "", nil, false
+	}
 }
 
 func (s *PostgresStore) CreateTicket(ctx context.Context, ticket shared.Ticket) (shared.Ticket, error) {

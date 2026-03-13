@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -732,7 +733,7 @@ func TestAlertAggregationWindowAndCrossProbe(t *testing.T) {
 		RuleVersion: "rules-v1",
 	}, &probeB, http.StatusCreated, "")
 
-	baseTime := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
+	baseTime := time.Now().UTC().Truncate(time.Minute).Add(-2*time.Hour + 10*time.Second)
 	doJSON(t, handler, "/api/v1/events/ingest", http.MethodPost, shared.EventBatch{
 		TenantID: "tenant-agg",
 		ProbeID:  probeA.ID,
@@ -846,6 +847,108 @@ func TestAlertAggregationWindowAndCrossProbe(t *testing.T) {
 	}
 	if len(detail.SameFlowTimeline) == 0 {
 		t.Fatal("expected same flow timeline to be present")
+	}
+}
+
+func TestAlertListSupportsCompositeConditions(t *testing.T) {
+	t.Setenv("APP_EXPORT_DIR", t.TempDir())
+	handler, cleanup, err := NewHandler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	var login shared.LoginResponse
+	doJSON(t, handler, "/api/v1/auth/login", http.MethodPost, shared.LoginRequest{
+		TenantID: "demo-tenant",
+		Username: "admin",
+		Password: "admin123",
+	}, &login, http.StatusOK, "")
+	authHeader := "Bearer " + login.Token
+
+	var probe shared.Probe
+	doJSON(t, handler, "/api/v1/probes/register", http.MethodPost, shared.RegisterProbeRequest{
+		TenantID:    "tenant-composite",
+		ProbeCode:   "probe-composite",
+		Name:        "Composite Probe",
+		Version:     "0.1.0",
+		RuleVersion: "rules-v1",
+	}, &probe, http.StatusCreated, "")
+
+	baseTime := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Second)
+	doJSON(t, handler, "/api/v1/events/ingest", http.MethodPost, shared.EventBatch{
+		TenantID: "tenant-composite",
+		ProbeID:  probe.ID,
+		Events: []shared.SuricataEvent{
+			{
+				Timestamp: baseTime.Format(time.RFC3339),
+				EventType: "alert",
+				SrcIP:     "10.0.0.9",
+				SrcPort:   41000,
+				DstIP:     "192.168.10.8",
+				DstPort:   443,
+				Proto:     "TCP",
+				AppProto:  "http",
+				FlowID:    "composite-flow-a",
+				Alert: &shared.SuricataAlert{
+					SignatureID: 9101,
+					Signature:   "Composite High Same IP",
+					Category:    "Web Attack",
+					Severity:    1,
+				},
+			},
+			{
+				Timestamp: baseTime.Add(2 * time.Minute).Format(time.RFC3339),
+				EventType: "alert",
+				SrcIP:     "10.0.0.9",
+				SrcPort:   41001,
+				DstIP:     "192.168.10.9",
+				DstPort:   8443,
+				Proto:     "TCP",
+				AppProto:  "http",
+				FlowID:    "composite-flow-b",
+				Alert: &shared.SuricataAlert{
+					SignatureID: 9102,
+					Signature:   "Composite Low Same IP",
+					Category:    "Web Attack",
+					Severity:    3,
+				},
+			},
+			{
+				Timestamp: baseTime.Add(4 * time.Minute).Format(time.RFC3339),
+				EventType: "alert",
+				SrcIP:     "10.0.0.8",
+				SrcPort:   41002,
+				DstIP:     "192.168.10.10",
+				DstPort:   9443,
+				Proto:     "TCP",
+				AppProto:  "http",
+				FlowID:    "composite-flow-c",
+				Alert: &shared.SuricataAlert{
+					SignatureID: 9103,
+					Signature:   "Composite High Other IP",
+					Category:    "Web Attack",
+					Severity:    1,
+				},
+			},
+		},
+	}, nil, http.StatusAccepted, "")
+
+	conditionIP := url.QueryEscape(`{"field":"ip","value":"10.0.0.9"}`)
+	conditionSeverity := url.QueryEscape(`{"field":"severity","value":"1"}`)
+
+	var alerts shared.AlertListResponse
+	doJSON(t, handler, "/api/v1/alerts?tenant_id=tenant-composite&match_mode=all&condition="+conditionIP+"&condition="+conditionSeverity, http.MethodGet, nil, &alerts, http.StatusOK, authHeader)
+	if len(alerts.Items) != 1 {
+		t.Fatalf("expected 1 alert for composite all-condition query, got %d", len(alerts.Items))
+	}
+	if alerts.Items[0].Signature != "Composite High Same IP" {
+		t.Fatalf("unexpected alert for all-condition query: %s", alerts.Items[0].Signature)
+	}
+
+	doJSON(t, handler, "/api/v1/alerts?tenant_id=tenant-composite&match_mode=any&condition="+conditionIP+"&condition="+conditionSeverity, http.MethodGet, nil, &alerts, http.StatusOK, authHeader)
+	if len(alerts.Items) != 3 {
+		t.Fatalf("expected 3 alerts for composite any-condition query, got %d", len(alerts.Items))
 	}
 }
 

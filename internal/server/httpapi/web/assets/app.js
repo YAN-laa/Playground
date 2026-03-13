@@ -10,8 +10,7 @@ const state = {
   selectedTicket: null,
   selectedProbe: null,
   alertDetailTab: 'details',
-  alertConditionOrder: [],
-  draggedAlertConditionKey: '',
+  alertConditions: [],
   selectedAlertIDs: new Set(),
   selectedTicketIDs: new Set(),
   alertPage: 1,
@@ -106,37 +105,17 @@ const ROLE_PROFILES = {
 
 const $ = (id) => document.getElementById(id);
 const tenantInput = $('tenant-filter');
-const srcInput = $('src-filter');
-const dstInput = $('dst-filter');
-const signatureInput = $('signature-filter');
-const assigneeInput = $('assignee-filter');
-const severityInput = $('severity-filter');
-const alertStatusInput = $('alert-status-filter');
-const alertCategoryInput = $('alert-category-filter');
-const alertProbeInput = $('alert-probe-filter');
-const alertAttackResultInput = $('alert-attack-result-filter');
-const alertProbeCountInput = $('alert-probe-count-filter');
-const alertWindowInput = $('alert-window-filter');
-const alertSinceInput = $('alert-since-filter');
 const alertSortByInput = $('alert-sort-by');
 const alertSortOrderInput = $('alert-sort-order');
 const alertPageSizeInput = $('alert-page-size');
 const alertsPageJumpInput = $('alerts-page-jump');
 const alertsTotalInfo = $('alerts-total-info');
-const alertViewModeInput = $('alert-view-mode');
 const alertConditionLogicInput = $('alert-condition-logic');
 const alertConditionFieldInput = $('alert-condition-field');
 const alertConditionInputWrap = $('alert-condition-input-wrap');
 const alertConditionAddBtn = $('alert-condition-add-btn');
-const alertConditionSearchBtn = $('alert-condition-search-btn');
 const alertConditionResetBtn = $('alert-condition-reset-btn');
 const alertFilterChips = $('alert-filter-chips');
-const alertPriorityFill = $('alert-priority-fill');
-const alertPriorityLevel = $('alert-priority-level');
-const alertPriorityScoreText = $('alert-priority-score-text');
-const alertPriorityNote = $('alert-priority-note');
-const alertPriorityStats = $('alert-priority-stats');
-const alertIntentCards = $('alert-intent-cards');
 const rawAlertSrcInput = $('raw-alert-src-filter');
 const rawAlertDstInput = $('raw-alert-dst-filter');
 const rawAlertSignatureInput = $('raw-alert-signature-filter');
@@ -194,13 +173,13 @@ const probeUpgradeForm = $('probe-upgrade-form');
 const probeUpgradeBatchForm = $('probe-upgrade-batch-form');
 
 const ALERT_CONDITION_FIELDS = {
-  src: { label: '源 IP', input: srcInput, type: 'text', placeholder: '输入源 IP' },
-  dst: { label: '目的 IP', input: dstInput, type: 'text', placeholder: '输入目的 IP' },
-  signature: { label: '告警名称', input: signatureInput, type: 'text', placeholder: '输入告警名称 / 签名' },
-  assignee: { label: '处理人', input: assigneeInput, type: 'text', placeholder: '输入处理人' },
+  ip: { label: 'IP', type: 'text', placeholder: '输入源或目的 IP' },
+  src_ip: { label: '源 IP', type: 'text', placeholder: '输入源 IP' },
+  dst_ip: { label: '目的 IP', type: 'text', placeholder: '输入目的 IP' },
+  signature: { label: '告警名称', type: 'text', placeholder: '输入告警名称 / 签名' },
+  assignee: { label: '处理人', type: 'text', placeholder: '输入处理人' },
   severity: {
     label: '告警等级',
-    input: severityInput,
     type: 'select',
     options: [
       { value: '', label: '选择告警等级' },
@@ -211,7 +190,6 @@ const ALERT_CONDITION_FIELDS = {
   },
   status: {
     label: '状态',
-    input: alertStatusInput,
     type: 'select',
     options: [
       { value: '', label: '选择状态' },
@@ -223,7 +201,6 @@ const ALERT_CONDITION_FIELDS = {
   },
   attack_result: {
     label: '攻击结果',
-    input: alertAttackResultInput,
     type: 'select',
     options: [
       { value: '', label: '选择攻击结果' },
@@ -233,11 +210,10 @@ const ALERT_CONDITION_FIELDS = {
       { value: 'unknown', label: '未知' },
     ],
   },
-  category: { label: '攻击类型', input: alertCategoryInput, type: 'text', placeholder: '输入攻击类型 / 分类' },
-  probe: { label: '探针', input: alertProbeInput, type: 'text', placeholder: '输入探针 ID' },
-  min_probe_count: { label: '跨探针数', input: alertProbeCountInput, type: 'number', placeholder: '输入最小跨探针数量', min: '1' },
-  min_window_mins: { label: '聚合窗口', input: alertWindowInput, type: 'number', placeholder: '输入最小聚合窗口（分钟）', min: '1' },
-  since: { label: '开始时间', input: alertSinceInput, type: 'datetime-local' },
+  category: { label: '攻击类型', type: 'text', placeholder: '输入攻击类型 / 分类' },
+  probe: { label: '探针', type: 'text', placeholder: '输入探针 ID' },
+  min_probe_count: { label: '跨探针数', type: 'number', placeholder: '输入最小跨探针数量', min: '1' },
+  min_window_mins: { label: '聚合窗口', type: 'number', placeholder: '输入最小聚合窗口（分钟）', min: '1' },
 };
 
 $('login-form').addEventListener('submit', onLogin);
@@ -285,10 +261,6 @@ $('refresh-exports-btn').addEventListener('click', async () => loadExportTasks()
 $('refresh-query-stats-btn').addEventListener('click', async () => loadQueryStats());
 alertConditionFieldInput.addEventListener('change', () => renderAlertConditionInput());
 alertConditionAddBtn.addEventListener('click', async () => applyAlertConditionFromBuilder());
-alertConditionSearchBtn.addEventListener('click', async () => {
-  syncAlertConditionBuilderValue();
-  await resetAlertPageAndReload();
-});
 alertConditionResetBtn.addEventListener('click', async () => clearAllAlertConditions());
 backToAlertsBtn.addEventListener('click', async () => {
   await navigate('alerts');
@@ -316,7 +288,7 @@ window.addEventListener('hashchange', async () => {
   await applyRouteFromLocation();
 });
 
-[srcInput, dstInput, signatureInput, assigneeInput, severityInput, alertStatusInput, alertCategoryInput, alertProbeInput, alertAttackResultInput, alertProbeCountInput, alertWindowInput, alertSinceInput, alertSortByInput, alertSortOrderInput, alertPageSizeInput]
+[alertSortByInput, alertSortOrderInput, alertPageSizeInput]
   .forEach((input) => input.addEventListener('change', async () => resetAlertPageAndReload()));
 alertConditionLogicInput.addEventListener('change', async () => resetAlertPageAndReload());
 [rawAlertSrcInput, rawAlertDstInput, rawAlertSignatureInput, rawAlertProbeInput, rawAlertSeverityInput, rawAlertAttackResultInput, rawAlertSinceInput, rawAlertPageSizeInput]
@@ -635,19 +607,9 @@ function buildRouteParams(page, options = {}) {
     case 'alert-detail':
     case 'alert-relation':
       appendIfValue(params, 'match_mode', alertConditionLogicInput.value);
-      appendIfValue(params, 'src', srcInput.value);
-      appendIfValue(params, 'dst', dstInput.value);
-      appendIfValue(params, 'signature', signatureInput.value);
-      appendIfValue(params, 'assignee', assigneeInput.value);
-      appendIfValue(params, 'severity', severityInput.value);
-      appendIfValue(params, 'status', alertStatusInput.value);
-      appendIfValue(params, 'attack_result', alertAttackResultInput.value);
-      appendIfValue(params, 'category', alertCategoryInput.value);
-      appendIfValue(params, 'probe', alertProbeInput.value);
-      appendIfValue(params, 'min_probe_count', alertProbeCountInput.value);
-      appendIfValue(params, 'min_window_mins', alertWindowInput.value);
-      appendIfValue(params, 'since', alertSinceInput.value);
-      appendIfValue(params, 'condition_order', state.alertConditionOrder.join(','));
+      for (const condition of state.alertConditions || []) {
+        params.append('condition', JSON.stringify(condition));
+      }
       appendIfValue(params, 'sort_by', alertSortByInput.value);
       appendIfValue(params, 'sort_order', alertSortOrderInput.value);
       appendIfValue(params, 'page', String(options.page || state.alertPage || 1));
@@ -695,6 +657,55 @@ function appendIfValue(params, key, value) {
   }
 }
 
+function parseAlertConditionsFromParams(params) {
+  if (!(params instanceof URLSearchParams)) {
+    return [];
+  }
+  const parsed = params.getAll('condition').map((raw) => {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }).filter(Boolean);
+  if (parsed.length) {
+    return normalizeAlertConditions(parsed);
+  }
+  return normalizeAlertConditions([
+    (params.get('src_ip') || params.get('src')) ? { field: 'src_ip', value: params.get('src_ip') || params.get('src') } : null,
+    (params.get('dst_ip') || params.get('dst')) ? { field: 'dst_ip', value: params.get('dst_ip') || params.get('dst') } : null,
+    params.get('signature') ? { field: 'signature', value: params.get('signature') } : null,
+    params.get('assignee') ? { field: 'assignee', value: params.get('assignee') } : null,
+    params.get('severity') ? { field: 'severity', value: params.get('severity') } : null,
+    params.get('status') ? { field: 'status', value: params.get('status') } : null,
+    params.get('attack_result') ? { field: 'attack_result', value: params.get('attack_result') } : null,
+    params.get('category') ? { field: 'category', value: params.get('category') } : null,
+    params.get('probe') ? { field: 'probe', value: params.get('probe') } : null,
+    params.get('min_probe_count') ? { field: 'min_probe_count', value: params.get('min_probe_count') } : null,
+    params.get('min_window_mins') ? { field: 'min_window_mins', value: params.get('min_window_mins') } : null,
+  ]);
+}
+
+function hasAlertConditionParams(params) {
+  if (!(params instanceof URLSearchParams)) {
+    return false;
+  }
+  return params.has('condition')
+    || params.has('src_ip')
+    || params.has('dst_ip')
+    || params.has('src')
+    || params.has('dst')
+    || params.has('signature')
+    || params.has('assignee')
+    || params.has('severity')
+    || params.has('status')
+    || params.has('attack_result')
+    || params.has('category')
+    || params.has('probe')
+    || params.has('min_probe_count')
+    || params.has('min_window_mins');
+}
+
 function applyRouteState(route) {
   const params = route.params;
   if (!(params instanceof URLSearchParams)) {
@@ -705,28 +716,14 @@ function applyRouteState(route) {
     case 'alert-detail':
     case 'alert-relation':
       alertConditionLogicInput.value = params.get('match_mode') || alertConditionLogicInput.value || 'all';
-      srcInput.value = params.get('src') || srcInput.value || '';
-      dstInput.value = params.get('dst') || dstInput.value || '';
-      signatureInput.value = params.get('signature') || signatureInput.value || '';
-      assigneeInput.value = params.get('assignee') || assigneeInput.value || '';
-      severityInput.value = params.get('severity') || severityInput.value || '';
-      alertStatusInput.value = params.get('status') || alertStatusInput.value || '';
-      alertAttackResultInput.value = params.get('attack_result') || alertAttackResultInput.value || '';
-      alertCategoryInput.value = params.get('category') || alertCategoryInput.value || '';
-      alertProbeInput.value = params.get('probe') || alertProbeInput.value || '';
-      alertProbeCountInput.value = params.get('min_probe_count') || alertProbeCountInput.value || '';
-      alertWindowInput.value = params.get('min_window_mins') || alertWindowInput.value || '';
-      alertSinceInput.value = params.get('since') || alertSinceInput.value || '';
-      const routeOrder = splitCSV(params.get('condition_order') || '');
-      if (routeOrder.length) {
-        state.alertConditionOrder = routeOrder;
+      if (hasAlertConditionParams(params)) {
+        state.alertConditions = parseAlertConditionsFromParams(params);
       }
       alertSortByInput.value = params.get('sort_by') || alertSortByInput.value || 'last_seen_at';
       alertSortOrderInput.value = params.get('sort_order') || alertSortOrderInput.value || 'desc';
       alertPageSizeInput.value = params.get('page_size') || alertPageSizeInput.value || '10';
       state.alertPageSize = Number(alertPageSizeInput.value || 10);
       state.alertPage = Math.max(1, Number(params.get('page') || state.alertPage || 1));
-      normalizeAlertConditionOrder();
       renderAlertConditionInput();
       break;
     case 'tickets':
@@ -874,18 +871,9 @@ async function loadOverviewStats() {
 async function loadAlerts() {
   const params = new URLSearchParams({ tenant_id: tenantInput.value });
   if (alertConditionLogicInput.value) params.set('match_mode', alertConditionLogicInput.value);
-  if (srcInput.value) params.set('src_ip', srcInput.value);
-  if (dstInput.value) params.set('dst_ip', dstInput.value);
-  if (signatureInput.value) params.set('signature', signatureInput.value);
-  if (assigneeInput.value) params.set('assignee', assigneeInput.value);
-  if (severityInput.value) params.set('severity', severityInput.value);
-  if (alertStatusInput.value) params.set('status', alertStatusInput.value);
-  if (alertAttackResultInput.value) params.set('attack_result', alertAttackResultInput.value);
-  if (alertCategoryInput.value) params.set('category', alertCategoryInput.value);
-  if (alertProbeInput.value) params.set('probe', alertProbeInput.value);
-  if (alertProbeCountInput.value) params.set('min_probe_count', alertProbeCountInput.value);
-  if (alertWindowInput.value) params.set('min_window_mins', alertWindowInput.value);
-  if (alertSinceInput.value) params.set('since', new Date(alertSinceInput.value).toISOString());
+  for (const condition of state.alertConditions || []) {
+    params.append('condition', JSON.stringify(condition));
+  }
   params.set('sort_by', alertSortByInput.value || 'last_seen_at');
   params.set('sort_order', alertSortOrderInput.value || 'desc');
   params.set('page', state.alertPage);
@@ -898,8 +886,8 @@ async function loadAlerts() {
     <tr data-alert-id="${alert.id}" class="alert-row">
       <td><input type="checkbox" class="alert-select" data-alert-id="${alert.id}" ${state.selectedAlertIDs.has(alert.id) ? 'checked' : ''} /></td>
       <td>
-        <div class="cell-primary">${formatDateTime(alert.last_seen_at)}</div>
-        <div class="cell-sub">${formatDateTime(alert.first_seen_at)}</div>
+        <div class="cell-primary">最近 ${formatDateTime(alert.last_seen_at)}</div>
+        <div class="cell-sub">首次 ${formatDateTime(alert.first_seen_at)}</div>
       </td>
       <td><span class="tag tag-warm">${alert.category || '未分类'}</span></td>
       <td>
@@ -948,137 +936,43 @@ async function loadAlerts() {
   $('alerts-page-info').textContent = `第 ${response.page || 1} 页 / 共 ${pages} 页`;
   alertsTotalInfo.textContent = `共 ${total} 条告警`;
   renderAlertFilterChips();
-  renderAlertAnalysisBoard(alerts, total);
 }
 
 function renderAlertFilterChips() {
-  normalizeAlertConditionOrder();
   const chips = buildAlertFilterChips();
-  alertFilterChips.innerHTML = chips.length
-    ? chips.map((chip) => `
-      <button
-        type="button"
-        class="filter-chip removable"
-        data-alert-clear-field="${escapeHTML(chip.key)}"
-        data-alert-condition-chip="${escapeHTML(chip.key)}"
-        draggable="true"
-      >
+  const modeText = alertConditionLogicInput.value === 'any' ? '满足任一条件' : '同时满足全部条件';
+  alertFilterChips.innerHTML = [
+    `<span class="filter-chip subtle"><strong>匹配</strong><span>${escapeHTML(modeText)}</span></span>`,
+    ...chips.map((chip, index) => `
+      <button type="button" class="filter-chip removable" data-alert-condition-remove="${index}">
         <strong>${escapeHTML(chip.label)}</strong>
         <span>${escapeHTML(chip.value)}</span>
         <span class="filter-chip-close">×</span>
       </button>
-    `).join('')
-    : '<span class="filter-chip subtle">当前未设置筛选条件</span>';
-  bindAlertFilterChipInteractions();
+    `),
+  ].join('');
+  document.querySelectorAll('[data-alert-condition-remove]').forEach((button) => button.addEventListener('click', async () => {
+    const index = Number(button.dataset.alertConditionRemove || -1);
+    if (index < 0) return;
+    await clearAlertCondition(index);
+  }));
 }
 
 function buildAlertFilterChips() {
-  const chips = [
-    srcInput.value ? { key: 'src', label: '源 IP', value: srcInput.value } : null,
-    dstInput.value ? { key: 'dst', label: '目的 IP', value: dstInput.value } : null,
-    signatureInput.value ? { key: 'signature', label: '告警名称', value: signatureInput.value } : null,
-    assigneeInput.value ? { key: 'assignee', label: '处理人', value: assigneeInput.value } : null,
-    alertAttackResultInput.value ? { key: 'attack_result', label: '攻击结果', value: formatAttackResult(alertAttackResultInput.value) } : null,
-    severityInput.value ? { key: 'severity', label: '告警等级', value: formatSeverity(severityInput.value) } : null,
-    alertCategoryInput.value ? { key: 'category', label: '攻击类型', value: alertCategoryInput.value } : null,
-    alertProbeInput.value ? { key: 'probe', label: '探针', value: alertProbeInput.value } : null,
-    alertStatusInput.value ? { key: 'status', label: '状态', value: formatAlertStatus(alertStatusInput.value) } : null,
-    alertProbeCountInput.value ? { key: 'min_probe_count', label: '跨探针数', value: `≥ ${alertProbeCountInput.value}` } : null,
-    alertWindowInput.value ? { key: 'min_window_mins', label: '聚合窗口', value: `≥ ${alertWindowInput.value} 分钟` } : null,
-    alertSinceInput.value ? { key: 'since', label: '开始时间', value: formatDateTime(alertSinceInput.value) } : null,
-  ].filter(Boolean);
-  const orderIndex = new Map(normalizeAlertConditionOrder().map((key, index) => [key, index]));
-  return chips.sort((left, right) => {
-    const leftIndex = orderIndex.has(left.key) ? orderIndex.get(left.key) : Number.MAX_SAFE_INTEGER;
-    const rightIndex = orderIndex.has(right.key) ? orderIndex.get(right.key) : Number.MAX_SAFE_INTEGER;
-    return leftIndex - rightIndex;
-  });
-}
-
-function normalizeAlertConditionOrder() {
-  const active = getActiveAlertConditionKeysUnsorted();
-  const activeSet = new Set(active);
-  const current = Array.isArray(state.alertConditionOrder) ? state.alertConditionOrder.filter((key) => activeSet.has(key)) : [];
-  const missing = active.filter((key) => !current.includes(key));
-  state.alertConditionOrder = [...current, ...missing];
-  return state.alertConditionOrder;
-}
-
-function getActiveAlertConditionKeysUnsorted() {
-  return [
-    srcInput.value ? 'src' : '',
-    dstInput.value ? 'dst' : '',
-    signatureInput.value ? 'signature' : '',
-    assigneeInput.value ? 'assignee' : '',
-    alertAttackResultInput.value ? 'attack_result' : '',
-    severityInput.value ? 'severity' : '',
-    alertCategoryInput.value ? 'category' : '',
-    alertProbeInput.value ? 'probe' : '',
-    alertStatusInput.value ? 'status' : '',
-    alertProbeCountInput.value ? 'min_probe_count' : '',
-    alertWindowInput.value ? 'min_window_mins' : '',
-    alertSinceInput.value ? 'since' : '',
-  ].filter(Boolean);
-}
-
-function bindAlertFilterChipInteractions() {
-  document.querySelectorAll('[data-alert-clear-field]').forEach((button) => button.addEventListener('click', async (event) => {
-    if (event.target?.classList?.contains('filter-chip-close')) {
-      event.preventDefault();
-      event.stopPropagation();
-      await clearAlertCondition(button.dataset.alertClearField || '');
-    }
+  return (state.alertConditions || []).map((condition) => ({
+    label: ALERT_CONDITION_FIELDS[condition.field]?.label || condition.field,
+    value: formatAlertConditionValue(condition),
   }));
-  document.querySelectorAll('[data-alert-condition-chip]').forEach((button) => {
-    const key = button.dataset.alertConditionChip || '';
-    button.addEventListener('dragstart', () => {
-      state.draggedAlertConditionKey = key;
-      button.classList.add('dragging');
-    });
-    button.addEventListener('dragend', () => {
-      state.draggedAlertConditionKey = '';
-      button.classList.remove('dragging');
-      document.querySelectorAll('[data-alert-condition-chip]').forEach((item) => item.classList.remove('drag-over'));
-    });
-    button.addEventListener('dragover', (event) => {
-      event.preventDefault();
-      button.classList.add('drag-over');
-    });
-    button.addEventListener('dragleave', () => {
-      button.classList.remove('drag-over');
-    });
-    button.addEventListener('drop', (event) => {
-      event.preventDefault();
-      button.classList.remove('drag-over');
-      const fromKey = state.draggedAlertConditionKey;
-      const toKey = key;
-      if (!fromKey || !toKey || fromKey === toKey) return;
-      reorderAlertCondition(fromKey, toKey);
-    });
-  });
-}
-
-function reorderAlertCondition(fromKey, toKey) {
-  const current = normalizeAlertConditionOrder().slice();
-  const fromIndex = current.indexOf(fromKey);
-  const toIndex = current.indexOf(toKey);
-  if (fromIndex === -1 || toIndex === -1) return;
-  current.splice(fromIndex, 1);
-  current.splice(toIndex, 0, fromKey);
-  state.alertConditionOrder = current;
-  persistAlertFilters();
-  renderAlertFilterChips();
 }
 
 function renderAlertConditionInput() {
   if (!alertConditionFieldInput || !alertConditionInputWrap) return;
-  const config = ALERT_CONDITION_FIELDS[alertConditionFieldInput.value] || ALERT_CONDITION_FIELDS.src;
-  const currentValue = config.input?.value || '';
+  const config = ALERT_CONDITION_FIELDS[alertConditionFieldInput.value] || ALERT_CONDITION_FIELDS.ip;
   if (config.type === 'select') {
     alertConditionInputWrap.innerHTML = `
       <select id="alert-condition-value" class="alert-condition-value">
         ${(config.options || []).map((option) => `
-          <option value="${escapeHTML(option.value)}" ${String(option.value) === String(currentValue) ? 'selected' : ''}>
+          <option value="${escapeHTML(option.value)}">
             ${escapeHTML(option.label)}
           </option>
         `).join('')}
@@ -1095,14 +989,13 @@ function renderAlertConditionInput() {
     }
     return;
   }
-  const inputType = config.type === 'number' ? 'number' : config.type === 'datetime-local' ? 'datetime-local' : 'text';
+  const inputType = config.type === 'number' ? 'number' : 'text';
   const minAttr = config.min ? `min="${escapeHTML(config.min)}"` : '';
   alertConditionInputWrap.innerHTML = `
     <input
       id="alert-condition-value"
       class="alert-condition-value"
       type="${inputType}"
-      value="${escapeHTML(currentValue)}"
       placeholder="${escapeHTML(config.placeholder || '')}"
       ${minAttr}
     />
@@ -1119,209 +1012,60 @@ function renderAlertConditionInput() {
 }
 
 async function applyAlertConditionFromBuilder() {
-  syncAlertConditionBuilderValue();
+  const control = $('alert-condition-value');
+  const field = String(alertConditionFieldInput.value || '').trim();
+  const value = String(control?.value || '').trim();
+  if (!field || !value) return;
+  state.alertConditions = normalizeAlertConditions([
+    ...(state.alertConditions || []),
+    { field, value },
+  ]);
   renderAlertConditionInput();
   await resetAlertPageAndReload();
 }
 
-function syncAlertConditionBuilderValue() {
-  const config = ALERT_CONDITION_FIELDS[alertConditionFieldInput.value];
-  const control = $('alert-condition-value');
-  if (!config || !control) return;
-  config.input.value = String(control.value || '').trim();
-}
-
-async function clearAlertCondition(fieldKey) {
-  const config = ALERT_CONDITION_FIELDS[fieldKey];
-  if (!config?.input) return;
-  config.input.value = '';
-  if (alertConditionFieldInput.value === fieldKey) {
-    renderAlertConditionInput();
-  }
+async function clearAlertCondition(index) {
+  state.alertConditions = (state.alertConditions || []).filter((_, itemIndex) => itemIndex !== index);
   await resetAlertPageAndReload();
 }
 
 async function clearAllAlertConditions() {
-  Object.values(ALERT_CONDITION_FIELDS).forEach((config) => {
-    if (config?.input) {
-      config.input.value = '';
-    }
-  });
-  state.alertConditionOrder = [];
+  state.alertConditions = [];
   renderAlertConditionInput();
   await resetAlertPageAndReload();
 }
 
-function renderAlertAnalysisBoard(alerts, total) {
-  const summary = buildAlertAnalysisSummary(alerts);
-  const width = summary.priorityScore;
-  alertPriorityFill.style.width = `${width}%`;
-  alertPriorityFill.className = `alert-priority-fill ${summary.priorityClass}`;
-  alertPriorityLevel.textContent = summary.priorityLabel;
-  if (alertPriorityScoreText) {
-    alertPriorityScoreText.textContent = `关注指数 ${summary.priorityScore} / 100`;
+function normalizeAlertConditions(conditions) {
+  const out = [];
+  const seen = new Set();
+  for (const item of conditions || []) {
+    const field = String(item?.field || '').trim();
+    const value = String(item?.value || '').trim();
+    if (!ALERT_CONDITION_FIELDS[field] || !value) continue;
+    const key = `${field}::${value}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ field, value });
   }
-  if (alertPriorityNote) {
-    alertPriorityNote.textContent = summary.priorityNote;
-  }
-  if (alertPriorityStats) {
-    alertPriorityStats.innerHTML = [
-      { label: '当前页', value: `${summary.totalAlerts} 条` },
-      { label: '高危告警', value: `${summary.severeCount} 条` },
-      { label: '成功事件', value: `${summary.successCount} 条` },
-      { label: '主类占比', value: summary.dominantCard ? `${summary.dominantCard.label} ${summary.dominantShare}%` : '暂无' },
-    ].map((item) => `
-      <div class="alert-priority-stat">
-        <span>${escapeHTML(item.label)}</span>
-        <strong>${escapeHTML(item.value)}</strong>
-      </div>
-    `).join('');
-  }
-  const groups = [
-    { key: '人工渗透', tone: 'red' },
-    { key: '程序自动化', tone: 'orange' },
-    { key: '业务风险', tone: 'yellow' },
-    { key: '未定性威胁', tone: 'slate' },
-  ];
-  const visibleGroups = groups.map((group) => {
-    const cards = summary.cards
-      .filter((card) => card.group === group.key && card.count > 0)
-      .sort((left, right) => right.count - left.count)
-      .map((card) => ({
-        ...card,
-        share: summary.totalAlerts ? Math.round((card.count / summary.totalAlerts) * 100) : 0,
-      }));
-    const totalCount = cards.reduce((sum, card) => sum + card.count, 0);
-    return {
-      ...group,
-      cards,
-      totalCount,
-      share: summary.totalAlerts ? Math.round((totalCount / summary.totalAlerts) * 100) : 0,
-      dominant: summary.dominantCard ? summary.dominantCard.group === group.key : false,
-    };
-  }).filter((group) => group.cards.length > 0)
-    .sort((left, right) => right.totalCount - left.totalCount);
-  if (!alerts.length || !visibleGroups.length) {
-    alertIntentCards.innerHTML = `
-      <section class="alert-analysis-empty">
-        <strong>当前页暂无可分析告警</strong>
-        <span>当筛选结果返回数据后，这里会自动按攻击性质收敛为紧凑卡片，并支持点击分类回填筛选。</span>
-      </section>
-    `;
-  } else {
-    alertIntentCards.innerHTML = visibleGroups.map((group) => `
-      <section class="intent-lane intent-lane-${group.tone}">
-        <div class="intent-lane-head">
-          <div class="intent-lane-meta">
-            <div class="intent-lane-headline">
-              <span class="intent-lane-title">${escapeHTML(group.key)}</span>
-              ${group.dominant ? '<span class="intent-lane-badge">首要关注</span>' : ''}
-            </div>
-            <span class="intent-lane-total">${group.totalCount} 条告警 · 占当前页 ${group.share}%</span>
-            <div class="intent-lane-meter"><span style="width:${Math.max(group.share, 8)}%"></span></div>
-          </div>
-        </div>
-        <div class="intent-lane-track">
-          ${group.cards.map((card) => `
-            <button type="button" class="intent-card intent-card-${card.tone} active" data-intent-filter="${escapeHTML(card.filter || '')}">
-              <div class="intent-card-top">
-                <span class="intent-card-type">${escapeHTML(card.label)}</span>
-                <strong>${card.count}</strong>
-              </div>
-              <div class="intent-card-meta">
-                <span>占比 ${card.share}%</span>
-                <span>${card.filter ? '点击筛选该类' : '当前兜底分类'}</span>
-              </div>
-              <small>${escapeHTML(card.desc)}</small>
-            </button>
-          `).join('')}
-        </div>
-      </section>
-    `).join('');
-  }
-  document.querySelectorAll('[data-intent-filter]').forEach((button) => button.addEventListener('click', async () => {
-    const filter = button.dataset.intentFilter || '';
-    alertCategoryInput.value = filter;
-    state.alertPage = 1;
-    await loadAlerts();
-  }));
-  if (!alerts.length) {
-    alertsTotalInfo.textContent = `${alertsTotalInfo.textContent} · 当前页暂无数据，智能分析面板按空结果展示`;
-  } else if (total) {
-    alertsTotalInfo.textContent = `${alertsTotalInfo.textContent} · 智能分析基于当前页 ${alerts.length} 条结果`;
-  }
+  return out;
 }
 
-function buildAlertAnalysisSummary(alerts) {
-  const buckets = [
-    { key: 'targeted', tone: 'red', group: '人工渗透', label: '定向攻击', desc: '具备明确利用意图、目标清晰的攻击事件。', filter: '定向攻击', count: 0 },
-    { key: 'suspected', tone: 'red', group: '人工渗透', label: '疑似定向攻击', desc: '存在利用特征，但攻击结果或上下文还不充分。', filter: '疑似', count: 0 },
-    { key: 'malware', tone: 'orange', group: '程序自动化', label: '病毒', desc: '恶意样本、僵尸网络、木马和投毒类事件。', filter: '病毒', count: 0 },
-    { key: 'scanner', tone: 'orange', group: '程序自动化', label: '扫描器攻击', desc: '批量探测、弱口令尝试和自动化扫描行为。', filter: '扫描', count: 0 },
-    { key: 'vuln', tone: 'yellow', group: '业务风险', label: '脆弱性风险', desc: '漏洞利用、公开组件弱点和高危暴露。', filter: '风险', count: 0 },
-    { key: 'biz', tone: 'yellow', group: '业务风险', label: '业务行为', desc: '业务相关异常、越权和非标准访问行为。', filter: '业务', count: 0 },
-    { key: 'unknown', tone: 'slate', group: '未定性威胁', label: '未定性威胁', desc: '当前还无法判定具体攻击性质的告警。', filter: '', count: 0 },
-  ];
-  let highestRisk = 0;
-  let successCount = 0;
-  let severeCount = 0;
-  for (const alert of alerts || []) {
-    highestRisk = Math.max(highestRisk, Number(alert.risk_score || 0));
-    if (String(alert.attack_result || '').toLowerCase() === 'success') successCount += 1;
-    if (Number(alert.severity || 0) === 1) severeCount += 1;
-    const bucket = classifyAlertIntent(alert);
-    const target = buckets.find((item) => item.key === bucket) || buckets[buckets.length - 1];
-    target.count += 1;
+function formatAlertConditionValue(condition) {
+  const value = String(condition?.value || '');
+  switch (condition?.field) {
+    case 'severity':
+      return formatSeverity(value);
+    case 'status':
+      return formatAlertStatus(value);
+    case 'attack_result':
+      return formatAttackResult(value);
+    case 'min_probe_count':
+      return `>= ${value}`;
+    case 'min_window_mins':
+      return `>= ${value} 分钟`;
+    default:
+      return value;
   }
-  const priorityScore = Math.max(18, Math.min(100, highestRisk || (successCount ? 82 : severeCount ? 70 : 36)));
-  const priorityLabel = priorityScore >= 75 ? '高' : priorityScore >= 45 ? '中' : '低';
-  const priorityClass = priorityScore >= 75 ? 'high' : priorityScore >= 45 ? 'medium' : 'low';
-  const cards = buckets.map((item) => ({
-    ...item,
-    active: item.count > 0,
-  }));
-  const activeBucketCount = cards.filter((item) => item.count > 0).length;
-  const dominantCard = cards.reduce((best, item) => (!best || item.count > best.count ? item : best), null);
-  const dominantShare = alerts.length && dominantCard && dominantCard.count > 0
-    ? Math.round((dominantCard.count / alerts.length) * 100)
-    : 0;
-  const priorityNote = !alerts.length
-    ? '当前筛选暂无结果，面板已切换为轻量摘要。'
-    : dominantCard && dominantCard.count > 0
-      ? `当前结果主要集中在 ${dominantCard.group} · ${dominantCard.label}，建议先从这类告警开始处置。`
-      : '当前结果较分散，建议按风险分和攻击结果优先值守。';
-  return {
-    priorityScore,
-    priorityLabel,
-    priorityClass,
-    cards,
-    totalAlerts: alerts.length,
-    highestRisk,
-    successCount,
-    severeCount,
-    activeBucketCount,
-    dominantCard: dominantCard && dominantCard.count > 0 ? dominantCard : null,
-    dominantShare,
-    priorityNote,
-  };
-}
-
-function classifyAlertIntent(alert) {
-  const signature = String(alert.signature || '').toLowerCase();
-  const category = String(alert.category || '').toLowerCase();
-  const attackResult = String(alert.attack_result || '').toLowerCase();
-  const text = `${signature} ${category}`;
-  if (/(trojan|backdoor|botnet|malware|virus|worm|勒索|木马|僵尸|xred|c2)/.test(text)) return 'malware';
-  if (/(scan|scanner|bruteforce|recon|扫描|弱口令|探测)/.test(text)) return 'scanner';
-  if (/(cve|exploit|rce|sql|xss|upload|webshell|命令执行|代码注入|文件上传|漏洞)/.test(text)) {
-    return attackResult === 'success' || Number(alert.severity || 0) === 1 ? 'targeted' : 'vuln';
-  }
-  if (/(定向|initial_access|privilege|administrator|横向|lateral|外联|账号)/.test(text)) {
-    return attackResult === 'success' || attackResult === 'failed' ? 'targeted' : 'suspected';
-  }
-  if (/(业务|dns|not suspicious traffic|信息|p2p|unusual|异常访问)/.test(text)) return 'biz';
-  if (attackResult === 'success' || attackResult === 'failed') return 'suspected';
-  return 'unknown';
 }
 
 async function loadRawAlerts() {
@@ -1833,11 +1577,9 @@ async function showAlertRelationGraph(alertID, relation = 'source', shouldNaviga
   document.querySelectorAll('[data-relation-node-filter]').forEach((button) => button.addEventListener('click', async () => {
     const mode = button.dataset.relationNodeFilter;
     if (mode === 'source') {
-      srcInput.value = button.dataset.nodeValue || '';
-      dstInput.value = '';
+      state.alertConditions = normalizeAlertConditions([{ field: 'src_ip', value: button.dataset.nodeValue || '' }]);
     } else if (mode === 'target') {
-      dstInput.value = button.dataset.nodeValue || '';
-      srcInput.value = '';
+      state.alertConditions = normalizeAlertConditions([{ field: 'dst_ip', value: button.dataset.nodeValue || '' }]);
     }
     state.alertPage = 1;
     await navigate('alerts', { page: 1, pageSize: state.alertPageSize });
@@ -2683,11 +2425,12 @@ async function showRawAlertDetail(rawAlertID, shouldNavigate = true) {
     </div>
   `;
   document.querySelectorAll('[data-aggregate-link]').forEach((button) => button.addEventListener('click', async () => {
-    srcInput.value = detail.item.src_ip || '';
-    dstInput.value = detail.item.dst_ip || '';
-    signatureInput.value = detail.item.signature || '';
-    alertAttackResultInput.value = detail.item.attack_result || '';
-    alertSinceInput.value = detail.item.event_time ? toDateTimeLocal(detail.item.event_time) : '';
+    state.alertConditions = normalizeAlertConditions([
+      { field: 'src_ip', value: detail.item.src_ip || '' },
+      { field: 'dst_ip', value: detail.item.dst_ip || '' },
+      { field: 'signature', value: detail.item.signature || '' },
+      { field: 'attack_result', value: detail.item.attack_result || '' },
+    ]);
     state.alertPage = 1;
     await navigate('alerts', { page: 1, pageSize: state.alertPageSize });
   }));
@@ -2943,16 +2686,7 @@ async function createAlertExportTask() {
     alert_query: {
       tenant_id: tenantInput.value,
       match_mode: alertConditionLogicInput.value,
-      src_ip: srcInput.value,
-      dst_ip: dstInput.value,
-      signature: signatureInput.value,
-      assignee: assigneeInput.value,
-      severity: Number(severityInput.value || 0),
-      status: alertStatusInput.value,
-      attack_result: alertAttackResultInput.value,
-      category: alertCategoryInput.value,
-      probe: alertProbeInput.value,
-      since: alertSinceInput.value ? new Date(alertSinceInput.value).toISOString() : '',
+      conditions: state.alertConditions || [],
       sort_by: alertSortByInput.value || 'last_seen_at',
       sort_order: alertSortOrderInput.value || 'desc',
     },
@@ -3065,19 +2799,7 @@ async function resetRawAlertPageAndReload() {
 function persistAlertFilters() {
   localStorage.setItem(STORAGE_KEYS.alerts, JSON.stringify({
     matchMode: alertConditionLogicInput.value,
-    conditionOrder: normalizeAlertConditionOrder(),
-    src: srcInput.value,
-    dst: dstInput.value,
-    signature: signatureInput.value,
-    assignee: assigneeInput.value,
-    severity: severityInput.value,
-    status: alertStatusInput.value,
-    attackResult: alertAttackResultInput.value,
-    category: alertCategoryInput.value,
-    probe: alertProbeInput.value,
-    minProbeCount: alertProbeCountInput.value,
-    minWindowMins: alertWindowInput.value,
-    since: alertSinceInput.value,
+    conditions: state.alertConditions || [],
     sortBy: alertSortByInput.value,
     sortOrder: alertSortOrderInput.value,
     pageSize: alertPageSizeInput.value,
@@ -3133,23 +2855,22 @@ function persistQueryStatsFilters() {
 function restoreFilters() {
   restoreObject(STORAGE_KEYS.alerts, (value) => {
     alertConditionLogicInput.value = value.matchMode || 'all';
-    state.alertConditionOrder = Array.isArray(value.conditionOrder) ? value.conditionOrder : splitCSV(value.conditionOrder || '');
-    srcInput.value = value.src || '';
-    dstInput.value = value.dst || '';
-    signatureInput.value = value.signature || '';
-    assigneeInput.value = value.assignee || '';
-    severityInput.value = value.severity || '';
-    alertStatusInput.value = value.status || '';
-    alertAttackResultInput.value = value.attackResult || '';
-    alertCategoryInput.value = value.category || '';
-    alertProbeInput.value = value.probe || '';
-    alertProbeCountInput.value = value.minProbeCount || '';
-    alertWindowInput.value = value.minWindowMins || '';
-    alertSinceInput.value = value.since || '';
+    state.alertConditions = normalizeAlertConditions(Array.isArray(value.conditions) ? value.conditions : [
+      value.src ? { field: 'src_ip', value: value.src } : null,
+      value.dst ? { field: 'dst_ip', value: value.dst } : null,
+      value.signature ? { field: 'signature', value: value.signature } : null,
+      value.assignee ? { field: 'assignee', value: value.assignee } : null,
+      value.severity ? { field: 'severity', value: value.severity } : null,
+      value.status ? { field: 'status', value: value.status } : null,
+      value.attackResult ? { field: 'attack_result', value: value.attackResult } : null,
+      value.category ? { field: 'category', value: value.category } : null,
+      value.probe ? { field: 'probe', value: value.probe } : null,
+      value.minProbeCount ? { field: 'min_probe_count', value: value.minProbeCount } : null,
+      value.minWindowMins ? { field: 'min_window_mins', value: value.minWindowMins } : null,
+    ]);
     alertSortByInput.value = value.sortBy || 'last_seen_at';
     alertSortOrderInput.value = value.sortOrder || 'desc';
     alertPageSizeInput.value = value.pageSize || '10';
-    normalizeAlertConditionOrder();
   });
   restoreObject(STORAGE_KEYS.tickets, (value) => {
     ticketStatusInput.value = value.status || '';

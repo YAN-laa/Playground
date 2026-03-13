@@ -682,6 +682,12 @@ func (r *Router) handleListAlerts(w http.ResponseWriter, req *http.Request) {
 		SortBy:    req.URL.Query().Get("sort_by"),
 		SortOrder: req.URL.Query().Get("sort_order"),
 	}
+	conditions, err := parseAlertConditions(req.URL.Query()["condition"])
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid condition"})
+		return
+	}
+	query.Conditions = conditions
 	var since time.Time
 	if raw := req.URL.Query().Get("since"); raw != "" {
 		parsed, err := time.Parse(time.RFC3339, raw)
@@ -1804,12 +1810,8 @@ func parseIntDefault(raw string, fallback int) int {
 func summarizeAlertQuery(query shared.AlertQuery) string {
 	parts := []string{
 		"tenant=" + query.TenantID,
-		"status=" + query.Status,
-		"src=" + query.SrcIP,
-		"dst=" + query.DstIP,
-		"signature=" + query.Signature,
-		"assignee=" + query.Assignee,
-		fmt.Sprintf("severity=%d", query.Severity),
+		"match_mode=" + query.MatchMode,
+		fmt.Sprintf("conditions=%d", len(query.EffectiveConditions())),
 		fmt.Sprintf("page=%d", query.Page),
 		fmt.Sprintf("page_size=%d", query.PageSize),
 	}
@@ -1830,4 +1832,28 @@ func summarizeFlowQuery(query shared.FlowQuery) string {
 		parts = append(parts, "since="+query.Since.Format(time.RFC3339))
 	}
 	return strings.Join(parts, ";")
+}
+
+func parseAlertConditions(rawValues []string) ([]shared.AlertCondition, error) {
+	if len(rawValues) == 0 {
+		return nil, nil
+	}
+	out := make([]shared.AlertCondition, 0, len(rawValues))
+	for _, raw := range rawValues {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		var condition shared.AlertCondition
+		if err := json.Unmarshal([]byte(raw), &condition); err != nil {
+			return nil, err
+		}
+		if shared.NormalizeAlertConditionField(condition.Field) == "" || strings.TrimSpace(condition.Value) == "" {
+			continue
+		}
+		out = append(out, shared.AlertCondition{
+			Field: shared.NormalizeAlertConditionField(condition.Field),
+			Value: strings.TrimSpace(condition.Value),
+		})
+	}
+	return out, nil
 }

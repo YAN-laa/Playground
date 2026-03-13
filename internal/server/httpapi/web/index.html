@@ -63,20 +63,18 @@
 
           <section id="page-alerts" class="page hidden">
             <div class="card page-card">
-              <div class="panel-head"><h2>告警中心</h2><span>按时间、源目地址、名称和等级快速筛选</span></div>
+              <div class="panel-head"><h2>告警中心</h2><span>支持多个条件按“且 / 或”组合筛选</span></div>
               <div class="alert-query-bar">
                 <div class="alert-query-bar-main">
-                  <select id="alert-view-mode">
-                    <option value="simple">简易模式</option>
-                  </select>
                   <select id="alert-condition-logic">
                     <option value="all">且</option>
                     <option value="any">或</option>
                   </select>
                   <div class="alert-condition-builder">
                     <select id="alert-condition-field">
-                      <option value="src">源 IP</option>
-                      <option value="dst">目的 IP</option>
+                      <option value="ip">IP</option>
+                      <option value="src_ip">源 IP</option>
+                      <option value="dst_ip">目的 IP</option>
                       <option value="signature">告警名称</option>
                       <option value="assignee">处理人</option>
                       <option value="severity">告警等级</option>
@@ -86,67 +84,26 @@
                       <option value="probe">探针</option>
                       <option value="min_probe_count">跨探针数</option>
                       <option value="min_window_mins">聚合窗口</option>
-                      <option value="since">开始时间</option>
                     </select>
                     <div id="alert-condition-input-wrap" class="alert-condition-input-wrap"></div>
                     <button id="alert-condition-add-btn" class="ghost" type="button">添加条件</button>
                   </div>
-                  <div id="alert-filter-chips" class="alert-condition-list"></div>
                 </div>
                 <div class="alert-query-bar-actions">
-                  <button id="alert-condition-search-btn" type="button">搜索</button>
                   <button id="alert-condition-reset-btn" class="ghost" type="button">清空</button>
                 </div>
               </div>
-              <div class="alert-analysis-board">
-                <div class="alert-analysis-priority">
-                  <div class="panel-head panel-head-compact">
-                    <h3>智能定性分析</h3>
-                    <span>根据当前筛选结果自动计算</span>
-                  </div>
-                  <div class="alert-priority-body">
-                    <div class="alert-priority-overview">
-                      <span class="muted">推荐关注优先级</span>
-                      <div class="alert-priority-scale">
-                        <strong id="alert-priority-level">高</strong>
-                        <span id="alert-priority-score-text">关注指数 0 / 100</span>
-                      </div>
-                      <p id="alert-priority-note" class="muted alert-priority-note">根据当前页结果给出关注建议</p>
-                    </div>
-                    <div class="alert-priority-meter">
-                      <div id="alert-priority-fill" class="alert-priority-fill"></div>
-                    </div>
-                    <div id="alert-priority-stats" class="alert-priority-stats"></div>
-                  </div>
+              <div class="alert-filter-chipbar">
+                <div class="alert-filter-chipbar-left">
+                  <div id="alert-filter-chips" class="alert-filter-chips"></div>
                 </div>
-                <div id="alert-intent-cards" class="alert-intent-cards"></div>
               </div>
               <div class="alert-toolbar">
-                <div class="filter-grid alert-filter-grid hidden">
-                  <input id="src-filter" placeholder="源 IP" />
-                  <input id="dst-filter" placeholder="目的 IP" />
-                  <input id="signature-filter" placeholder="告警名称 / 签名" />
-                  <input id="assignee-filter" placeholder="处理人" />
-                  <input id="severity-filter" placeholder="等级（1/2/3）" />
-                  <input id="alert-status-filter" placeholder="状态" />
-                  <input id="alert-category-filter" placeholder="攻击类型 / 分类" />
-                  <input id="alert-probe-filter" placeholder="探针 ID" />
-                  <select id="alert-attack-result-filter">
-                    <option value="">攻击结果</option>
-                    <option value="success">成功</option>
-                    <option value="failed">失败</option>
-                    <option value="attempted">尝试</option>
-                    <option value="unknown">未知</option>
-                  </select>
-                  <input id="alert-probe-count-filter" placeholder="跨探针数 >= " />
-                  <input id="alert-window-filter" placeholder="聚合窗口 >= 分钟" />
-                </div>
                 <div class="alert-toolbar-actions">
-                  <input id="alert-since-filter" type="datetime-local" />
                   <select id="alert-sort-by">
-                    <option value="last_seen_at">最近发生时间</option>
-                    <option value="severity">告警等级</option>
-                    <option value="risk_score">风险分值</option>
+                    <option value="last_seen_at">按时间排序</option>
+                    <option value="severity">按告警等级排序</option>
+                    <option value="risk_score">按风险分值排序</option>
                   </select>
                   <select id="alert-sort-order">
                     <option value="desc">降序</option>
@@ -168,7 +125,7 @@
                   <thead>
                     <tr>
                       <th><input id="alerts-select-all" type="checkbox" /></th>
-                      <th>最近发生时间</th>
+                      <th>时间</th>
                       <th>攻击类型</th>
                       <th>告警名称</th>
                       <th>告警等级</th>

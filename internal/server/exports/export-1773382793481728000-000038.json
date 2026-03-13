@@ -1,0 +1,33 @@
+[
+  {
+    "id": "alert-1773382793388358000-000025",
+    "tenant_id": "tenant-org",
+    "fingerprint": "45e335af7e62b2263af76795590d1f7102b8174f",
+    "first_seen_at": "2026-03-13T06:19:53Z",
+    "last_seen_at": "2026-03-13T06:19:53Z",
+    "event_count": 1,
+    "probe_ids": [
+      "probe-1773382793388322000-000021"
+    ],
+    "probe_count": 1,
+    "src_ip": "10.20.0.1",
+    "dst_ip": "192.168.20.10",
+    "dst_port": 80,
+    "proto": "TCP",
+    "signature_id": 7001,
+    "signature": "HQ Alert",
+    "category": "Test",
+    "severity": 1,
+    "risk_score": 100,
+    "attack_result": "unknown",
+    "window_minutes": 0,
+    "status": "new",
+    "assignee": "",
+    "source_asset_id": "",
+    "source_asset_name": "",
+    "target_asset_id": "asset-1773382793388299000-000015",
+    "target_asset_name": "HQ-Web",
+    "threat_intel_tags": [],
+    "threat_intel_hits": []
+  }
+]

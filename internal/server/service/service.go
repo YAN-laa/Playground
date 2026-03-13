@@ -2461,7 +2461,7 @@ func (s *Service) failExportTask(ctx context.Context, task shared.ExportTask, er
 func summarizeExportRequest(req shared.ExportTaskRequest) string {
 	switch req.ResourceType {
 	case "alerts":
-		return fmt.Sprintf("alerts tenant=%s src=%s dst=%s signature=%s status=%s", req.TenantID, req.AlertQuery.SrcIP, req.AlertQuery.DstIP, req.AlertQuery.Signature, req.AlertQuery.Status)
+		return fmt.Sprintf("alerts tenant=%s conditions=%d match_mode=%s", req.TenantID, len(req.AlertQuery.EffectiveConditions()), req.AlertQuery.MatchMode)
 	case "flows":
 		return fmt.Sprintf("flows tenant=%s src=%s dst=%s app_proto=%s", req.TenantID, req.FlowQuery.SrcIP, req.FlowQuery.DstIP, req.FlowQuery.AppProto)
 	default:

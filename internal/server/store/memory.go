@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -685,52 +686,10 @@ func (s *MemoryStore) ListAlerts(_ context.Context, query shared.AlertQuery) ([]
 }
 
 func matchAlertQuery(alert shared.Alert, query shared.AlertQuery) bool {
-	conditions := make([]bool, 0, 10)
-	if query.Status != "" {
-		conditions = append(conditions, alert.Status == query.Status)
-	}
-	if query.SrcIP != "" {
-		conditions = append(conditions, alert.SrcIP == query.SrcIP)
-	}
-	if query.DstIP != "" {
-		conditions = append(conditions, alert.DstIP == query.DstIP)
-	}
-	if query.Signature != "" {
-		conditions = append(conditions, strings.Contains(strings.ToLower(alert.Signature), strings.ToLower(query.Signature)))
-	}
-	if query.Category != "" {
-		conditions = append(conditions, strings.Contains(strings.ToLower(alert.Category), strings.ToLower(query.Category)))
-	}
-	if query.Probe != "" {
-		matched := false
-		for _, probeID := range alert.ProbeIDs {
-			if strings.Contains(strings.ToLower(probeID), strings.ToLower(query.Probe)) {
-				matched = true
-				break
-			}
-		}
-		conditions = append(conditions, matched)
-	}
-	if query.Severity != 0 {
-		conditions = append(conditions, alert.Severity == query.Severity)
-	}
-	if query.Assignee != "" {
-		conditions = append(conditions, alert.Assignee == query.Assignee)
-	}
-	if query.AttackResult != "" {
-		conditions = append(conditions, alert.AttackResult == query.AttackResult)
-	}
-	if query.MinProbeCount > 0 {
-		conditions = append(conditions, alert.ProbeCount >= query.MinProbeCount)
-	}
-	if query.MaxProbeCount > 0 {
-		conditions = append(conditions, alert.ProbeCount <= query.MaxProbeCount)
-	}
-	if query.MinWindowMins > 0 {
-		conditions = append(conditions, alert.WindowMinutes >= query.MinWindowMins)
-	}
-	if query.MaxWindowMins > 0 {
-		conditions = append(conditions, alert.WindowMinutes <= query.MaxWindowMins)
+	queryConditions := query.EffectiveConditions()
+	conditions := make([]bool, 0, len(queryConditions))
+	for _, condition := range queryConditions {
+		conditions = append(conditions, matchSingleAlertCondition(alert, condition))
 	}
 	if len(conditions) == 0 {
 		return true
@@ -749,6 +708,51 @@ func matchAlertQuery(alert shared.Alert, query shared.AlertQuery) bool {
 		}
 	}
 	return true
+}
+
+func matchSingleAlertCondition(alert shared.Alert, condition shared.AlertCondition) bool {
+	switch shared.NormalizeAlertConditionField(condition.Field) {
+	case "ip":
+		return alert.SrcIP == condition.Value || alert.DstIP == condition.Value
+	case "src_ip":
+		return alert.SrcIP == condition.Value
+	case "dst_ip":
+		return alert.DstIP == condition.Value
+	case "signature":
+		return strings.Contains(strings.ToLower(alert.Signature), strings.ToLower(condition.Value))
+	case "category":
+		return strings.Contains(strings.ToLower(alert.Category), strings.ToLower(condition.Value))
+	case "probe":
+		for _, probeID := range alert.ProbeIDs {
+			if strings.Contains(strings.ToLower(probeID), strings.ToLower(condition.Value)) {
+				return true
+			}
+		}
+		return false
+	case "severity":
+		value, err := strconv.Atoi(condition.Value)
+		return err == nil && alert.Severity == value
+	case "assignee":
+		return alert.Assignee == condition.Value
+	case "status":
+		return alert.Status == condition.Value
+	case "attack_result":
+		return alert.AttackResult == condition.Value
+	case "min_probe_count":
+		value, err := strconv.Atoi(condition.Value)
+		return err == nil && alert.ProbeCount >= value
+	case "max_probe_count":
+		value, err := strconv.Atoi(condition.Value)
+		return err == nil && alert.ProbeCount <= value
+	case "min_window_mins":
+		value, err := strconv.Atoi(condition.Value)
+		return err == nil && alert.WindowMinutes >= value
+	case "max_window_mins":
+		value, err := strconv.Atoi(condition.Value)
+		return err == nil && alert.WindowMinutes <= value
+	default:
+		return false
+	}
 }
 
 func (s *MemoryStore) CreateTicket(_ context.Context, ticket shared.Ticket) (shared.Ticket, error) {

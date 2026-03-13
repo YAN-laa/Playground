@@ -1,6 +1,10 @@
 package shared
 
-import "time"
+import (
+	"strconv"
+	"strings"
+	"time"
+)
 
 type Probe struct {
 	ID                string    `json:"id"`
@@ -481,27 +485,113 @@ type AlertTimelineItem struct {
 }
 
 type AlertQuery struct {
-	TenantID        string    `json:"tenant_id"`
-	MatchMode       string    `json:"match_mode"`
-	Status          string    `json:"status"`
-	Since           time.Time `json:"since"`
-	SrcIP           string    `json:"src_ip"`
-	DstIP           string    `json:"dst_ip"`
-	Signature       string    `json:"signature"`
-	Category        string    `json:"category"`
-	Probe           string    `json:"probe"`
-	Severity        int       `json:"severity"`
-	Assignee        string    `json:"assignee"`
-	AttackResult    string    `json:"attack_result"`
-	MinProbeCount   int       `json:"min_probe_count"`
-	MaxProbeCount   int       `json:"max_probe_count"`
-	MinWindowMins   int       `json:"min_window_mins"`
-	MaxWindowMins   int       `json:"max_window_mins"`
-	AllowedAssetIDs []string  `json:"allowed_asset_ids,omitempty"`
-	SortBy          string    `json:"sort_by"`
-	SortOrder       string    `json:"sort_order"`
-	Page            int       `json:"page"`
-	PageSize        int       `json:"page_size"`
+	TenantID        string           `json:"tenant_id"`
+	MatchMode       string           `json:"match_mode"`
+	Conditions      []AlertCondition `json:"conditions,omitempty"`
+	Status          string           `json:"status"`
+	Since           time.Time        `json:"since"`
+	SrcIP           string           `json:"src_ip"`
+	DstIP           string           `json:"dst_ip"`
+	Signature       string           `json:"signature"`
+	Category        string           `json:"category"`
+	Probe           string           `json:"probe"`
+	Severity        int              `json:"severity"`
+	Assignee        string           `json:"assignee"`
+	AttackResult    string           `json:"attack_result"`
+	MinProbeCount   int              `json:"min_probe_count"`
+	MaxProbeCount   int              `json:"max_probe_count"`
+	MinWindowMins   int              `json:"min_window_mins"`
+	MaxWindowMins   int              `json:"max_window_mins"`
+	AllowedAssetIDs []string         `json:"allowed_asset_ids,omitempty"`
+	SortBy          string           `json:"sort_by"`
+	SortOrder       string           `json:"sort_order"`
+	Page            int              `json:"page"`
+	PageSize        int              `json:"page_size"`
+}
+
+type AlertCondition struct {
+	Field string `json:"field"`
+	Value string `json:"value"`
+}
+
+func NormalizeAlertConditionField(field string) string {
+	switch strings.TrimSpace(strings.ToLower(field)) {
+	case "ip":
+		return "ip"
+	case "src", "src_ip":
+		return "src_ip"
+	case "dst", "dst_ip":
+		return "dst_ip"
+	case "signature":
+		return "signature"
+	case "category":
+		return "category"
+	case "probe":
+		return "probe"
+	case "severity":
+		return "severity"
+	case "assignee":
+		return "assignee"
+	case "status":
+		return "status"
+	case "attack_result":
+		return "attack_result"
+	case "min_probe_count":
+		return "min_probe_count"
+	case "max_probe_count":
+		return "max_probe_count"
+	case "min_window_mins":
+		return "min_window_mins"
+	case "max_window_mins":
+		return "max_window_mins"
+	default:
+		return ""
+	}
+}
+
+func (q AlertQuery) EffectiveConditions() []AlertCondition {
+	out := make([]AlertCondition, 0, len(q.Conditions)+12)
+	seen := make(map[string]struct{}, len(q.Conditions)+12)
+	appendCondition := func(field, value string) {
+		normalizedField := NormalizeAlertConditionField(field)
+		normalizedValue := strings.TrimSpace(value)
+		if normalizedField == "" || normalizedValue == "" {
+			return
+		}
+		key := normalizedField + "\x00" + normalizedValue
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, AlertCondition{Field: normalizedField, Value: normalizedValue})
+	}
+	for _, condition := range q.Conditions {
+		appendCondition(condition.Field, condition.Value)
+	}
+	appendCondition("status", q.Status)
+	appendCondition("src_ip", q.SrcIP)
+	appendCondition("dst_ip", q.DstIP)
+	appendCondition("signature", q.Signature)
+	appendCondition("category", q.Category)
+	appendCondition("probe", q.Probe)
+	if q.Severity > 0 {
+		appendCondition("severity", strconv.Itoa(q.Severity))
+	}
+	appendCondition("assignee", q.Assignee)
+	appendCondition("attack_result", q.AttackResult)
+	if q.MinProbeCount > 0 {
+		appendCondition("min_probe_count", strconv.Itoa(q.MinProbeCount))
+	}
+	if q.MaxProbeCount > 0 {
+		appendCondition("max_probe_count", strconv.Itoa(q.MaxProbeCount))
+	}
+	if q.MinWindowMins > 0 {
+		appendCondition("min_window_mins", strconv.Itoa(q.MinWindowMins))
+	}
+	if q.MaxWindowMins > 0 {
+		appendCondition("max_window_mins", strconv.Itoa(q.MaxWindowMins))
+	}
+	return out
 }
 
 type AlertListResponse struct {
